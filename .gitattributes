@@ -1,0 +1,3 @@
+*.dll binary
+*.bin binary
+Install/BepInEx/plugins/canemall_mp binary
