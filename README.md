@@ -104,3 +104,10 @@ Testing on one PC: host, then join `127.0.0.1` from a second copy of the game.
 Both mods are plain C# (`langversion 10`, `-unsafe`) compiled against the game's BepInEx interop assemblies (`BepInEx/interop/*.dll`, `BepInEx/core/*.dll`, `dotnet/*.dll` from your game folder) plus the [LiteNetLib](https://github.com/RevenantX/LiteNetLib) sources. Embedded resources:
 `CanEmAllMP`: `res/cursor0-7.bin` and `res/cursorS0-7.bin` as `cursorN` / `cursorSN`; `CanEmAllMPModels`: `res/headmask.bin` as `headmask`.
 `source/build.sh` is the build script used during development (reference list in a `refs.txt`).
+
+---
+
+## License
+
+Use it, modify it, and share your own versions or forks **with credit**. Don't re-upload it unchanged and don't sell it. See [LICENSE](LICENSE) and [third-party notices](THIRD-PARTY-NOTICES.md).
+Unofficial fan mod, not affiliated with the developers of Can 'Em All.
