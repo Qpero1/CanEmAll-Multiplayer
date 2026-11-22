@@ -66,6 +66,7 @@ namespace CanEmAllMP
             InSuck = true; _inSuckSince = Time.unscaledTime;
             EnemySync.MarkHeldByOthers();
             CanSync.MarkHeldByOthers();
+            CrateSync.MarkHeldByOthers();
         }
 
         public static void AfterSuck(Vacuum v)
@@ -84,7 +85,7 @@ namespace CanEmAllMP
             {
                 _scratch.Clear();
                 EnemySync.UnmarkHeldByOthers();
-                CanSync.UnmarkHeldByOthers();
+                CanSync.UnmarkHeldByOthers(); CrateSync.UnmarkHeldByOthers();
                 InSuck = false;
                 _heldFrame = -1;
             }
@@ -97,7 +98,7 @@ namespace CanEmAllMP
             if (InSuck && Time.unscaledTime - _inSuckSince > 0.5f)
             {
                 InSuck = false;
-                try { EnemySync.UnmarkHeldByOthers(); CanSync.UnmarkHeldByOthers(); } catch { }
+                try { EnemySync.UnmarkHeldByOthers(); CanSync.UnmarkHeldByOthers(); CrateSync.UnmarkHeldByOthers(); } catch { }
             }
         }
 
@@ -106,7 +107,9 @@ namespace CanEmAllMP
             var e = g.TryCast<Enemy>();
             if (e != null) { if (!EnemySync.LocalGrab(e, false)) Eject(e); return; }
             var c = g.TryCast<Can>();
-            if (c != null && !CanSync.LocalGrab(c, false)) Eject(c);
+            if (c != null) { if (!CanSync.LocalGrab(c, false)) Eject(c); return; }
+            var k = g.TryCast<Crate>();
+            if (k != null && !CrateSync.LocalGrab(k, false)) Eject(k);
         }
 
         // ------------------------------------------------ letting go

@@ -19,19 +19,35 @@ namespace CanEmAllMP
         private static GameObject _root;
         private static RectTransform _box;
         private static TMP_Text _title;
-        private class Row { public GameObject Go; public Image Dot; public TMP_Text Name, Stats; }
+        private class Row { public GameObject Go, Kick; public Image Dot; public TMP_Text Name, Stats, KickLabel; public int Id = -1; public float ConfirmUntil; }
         private static readonly List<Row> _rows = new List<Row>();
         private static float _nextTry, _nextRefresh;
 
+        /// Tab + Left Alt held: the mouse is free (to click KICK); camera and weapons ignore it meanwhile.
+        public static bool CursorFree { get; private set; }
+        private static CursorLockMode _prevLock;
+        private static bool _prevVisible;
+
         public static void Tick()
         {
-            bool want = false;
+            bool want = false, alt = false;
             try
             {
                 var kb = UnityEngine.InputSystem.Keyboard.current;
                 want = kb != null && kb.tabKey.isPressed && Net.Active && GameApi.InGame && !GameApi.IsPaused && !MpManager.MenuOpen;
+                alt = want && kb.leftAltKey.isPressed;
             }
             catch { }
+            if (alt && !CursorFree)
+            {
+                CursorFree = true;
+                _prevLock = Cursor.lockState; _prevVisible = Cursor.visible;
+            }
+            if (CursorFree)
+            {
+                if (alt) { Cursor.lockState = CursorLockMode.None; Cursor.visible = true; }
+                else { CursorFree = false; Cursor.lockState = _prevLock; Cursor.visible = _prevVisible; }
+            }
 
             if (want && _root == null && Time.unscaledTime >= _nextTry)
             {
@@ -74,8 +90,12 @@ namespace CanEmAllMP
                 if (c != null && c.GetIl2CppType().Name == "UIScreen") UnityEngine.Object.DestroyImmediate(c);
             }
             var bg = root.GetComponent<Image>(); if (bg != null) bg.enabled = false;
-            var cg = root.GetComponent<CanvasGroup>(); if (cg != null) { cg.blocksRaycasts = false; cg.interactable = false; cg.alpha = 1f; }
-            Kill(Child(rt, "Title")); Kill(Child(rt, "Buttons")); Kill(Child(rt, "Back"));
+            // clickable only for the host's KICK buttons (everything else has raycastTarget off, so the game's UI
+            // underneath, e.g. the skill tree, still gets its clicks)
+            var cg = root.GetComponent<CanvasGroup>(); if (cg != null) { cg.blocksRaycasts = true; cg.interactable = true; cg.alpha = 1f; }
+            var back = Child(rt, "Back");
+            if (back != null) back.gameObject.SetActive(false);   // template for KICK, removed after building
+            Kill(Child(rt, "Title")); Kill(Child(rt, "Buttons"));
             Kill(Child(rt, "Audio")); Kill(Child(rt, "Graphics"));
 
             var box = Child(rt, "General");
@@ -92,10 +112,10 @@ namespace CanEmAllMP
 
             var head = TextRow(box, tRow, "Players");
             _title = Label(Child(box, "MP_Players"));
-            if (_title != null) { _title.fontSize = 18; }
+            if (_title != null) { Loc.Unbind(_title); _title.fontSize = 18; _title.fontSizeMax = 18; var tr = RT(_title.transform); if (tr != null) tr.sizeDelta = new Vector2(Mathf.Max(tr.sizeDelta.x, 560f), tr.sizeDelta.y); }
             Columns(head);
-            head.text = Cols("KILLS", "DEATHS", "PING");
-            head.fontSize = 12;
+            RT(head.transform).anchoredPosition = new Vector2(-100f, 0f);   // same place as the rows' numbers
+            _head = head; _headLang = -1;
             Line(box, tLine);
 
             _rows.Clear();
@@ -113,17 +133,43 @@ namespace CanEmAllMP
                 if (ddImg != null) { r.Dot.sprite = ddImg.sprite; r.Dot.type = Image.Type.Sliced; r.Dot.pixelsPerUnitMultiplier = ddImg.pixelsPerUnitMultiplier * 2f; }
 
                 r.Name = Label(row);
+                Loc.Unbind(r.Name);
+                r.Name.enableAutoSizing = false;
                 var nr = RT(r.Name.transform);
                 nr.anchoredPosition = new Vector2(nr.anchoredPosition.x + 22f, nr.anchoredPosition.y);
-                nr.sizeDelta = new Vector2(240f, nr.sizeDelta.y);
+                nr.sizeDelta = new Vector2(200f, nr.sizeDelta.y);
                 r.Name.fontSize = 16; r.Name.enableWordWrapping = false; r.Name.overflowMode = TextOverflowModes.Ellipsis;
 
                 r.Stats = Clone(r.Name.gameObject, row).GetComponent<TMP_Text>();
                 r.Stats.gameObject.name = "Stats";
                 Columns(r.Stats);
-                r.Stats.fontSize = 16;
+                r.Stats.fontSize = 15;
+                RT(r.Stats.transform).anchoredPosition = new Vector2(-100f, 0f);   // room for KICK on the right
+
+                if (back != null)
+                {
+                    var k = Clone(back.gameObject, row);
+                    k.name = "Kick";
+                    k.SetActive(false);
+                    Kill(Child(k.transform, "Icon"));
+                    const float ks = 0.5f;
+                    var kt = Label(k.transform);
+                    if (kt != null) { Loc.Set(kt, "KICK"); Stretch(RT(kt.transform)); kt.alignment = TextAlignmentOptions.Center; kt.fontSize = kt.fontSize * 0.65f; kt.enableWordWrapping = false; Loc.Fit(kt, 0.5f); }
+                    var ki = k.GetComponent<Image>(); if (ki != null) ki.pixelsPerUnitMultiplier = ki.pixelsPerUnitMultiplier / ks;
+                    var rc = RT(Child(k.transform, "Raycast")); if (rc != null) rc.sizeDelta = rc.sizeDelta * ks;
+                    Place(RT(k), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), Vector2.zero, new Vector2(170f * ks, 64f * ks));
+                    r.Kick = k; r.KickLabel = kt;
+                    var rr2 = r;
+                    OnClick(k, () => OnKick(rr2));
+                }
                 _rows.Add(r);
             }
+            if (back != null) Kill(back);
+
+            // nothing but the KICK buttons catches clicks
+            foreach (var g in root.GetComponentsInChildren<Graphic>(true)) if (g != null) g.raycastTarget = false;
+            foreach (var r in _rows)
+                if (r.Kick != null) foreach (var g in r.Kick.GetComponentsInChildren<Graphic>(true)) if (g != null) g.raycastTarget = true;
 
             foreach (var o in old) Kill(o);
             Strip(root);
@@ -132,12 +178,28 @@ namespace CanEmAllMP
 
         private static void Columns(TMP_Text t)
         {
-            Place(RT(t.transform), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), Vector2.zero, new Vector2(240f, 24f));
+            Place(RT(t.transform), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), Vector2.zero, new Vector2(410f, 24f));
             t.alignment = TextAlignmentOptions.MidlineLeft;
             t.richText = true; t.enableWordWrapping = false;
         }
 
-        private static string Cols(string a, string b, string c) => $"{a}<pos=85>{b}<pos=175>{c}";
+        /// Host: click KICK, then again within 3 s to confirm.
+        private static void OnKick(Row r)
+        {
+            if (!Net.IsHost || r.Id <= 0) return;
+            if (Time.unscaledTime > r.ConfirmUntil)
+            {
+                r.ConfirmUntil = Time.unscaledTime + 3f;
+                if (r.KickLabel != null) Loc.Set(r.KickLabel, "SURE?");
+                return;
+            }
+            r.ConfirmUntil = 0f;
+            Net.Kick(r.Id);
+        }
+
+        private static TMP_Text _head; private static int _headLang = -1;
+
+        private static string Cols(string a, string b, string c, string d, string e) => $"{a}<pos=62>{b}<pos=135>{c}<pos=230>{d}<pos=320>{e}";
 
         private static void Refresh()
         {
@@ -145,7 +207,14 @@ namespace CanEmAllMP
             {
                 var ids = new List<int>(Net.Players.Keys);
                 ids.Sort();
-                if (_title != null) _title.text = $"Players ({ids.Count}/8)";
+                bool host = Net.IsHost;
+                string cap = host && Net.MaxPlayers > 0 ? "/" + Net.MaxPlayers : "";
+                if (_title != null) _title.text = Loc.F("Players ({0})", ids.Count + cap) + (host && ids.Count > 1 && !CursorFree ? "   <size=60%><alpha=#99>" + Loc.T("hold LEFT ALT to click KICK") + "</size>" : "");
+                if (_head != null && _headLang != Loc.Lang)
+                {
+                    _headLang = Loc.Lang;
+                    _head.text = Loc.Columns(_head, 12f, new[] { 0f, 62f, 135f, 230f, 320f }, 410f, "KILLS", "DEATHS", "GAMBLED", "WON", "PING");
+                }
                 for (int i = 0; i < _rows.Count; i++)
                 {
                     var r = _rows[i];
@@ -154,9 +223,17 @@ namespace CanEmAllMP
                     if (!show) continue;
                     int id = ids[i];
                     r.Dot.color = Palette.ForPlayer(id);
-                    r.Name.text = Net.NameOf(id) + (id == Net.LocalId ? " (you)" : "");
+                    r.Name.text = Net.NameOf(id) + (id == Net.LocalId ? " " + Loc.T("(you)") : "");
                     PlayerStats.All.TryGetValue(id, out var s);
-                    r.Stats.text = Cols((s?.Kills ?? 0).ToString(), (s?.Deaths ?? 0).ToString(), PauseUi.PingText(id));
+                    r.Stats.text = Cols((s?.Kills ?? 0).ToString(), (s?.Deaths ?? 0).ToString(),
+                        PlayerStats.Money(s?.Gambled ?? 0), PlayerStats.Money(s?.Won ?? 0), PauseUi.PingText(id));
+                    if (r.Id != id) { r.Id = id; r.ConfirmUntil = 0f; }
+                    bool kickable = host && id != Net.LocalId;
+                    if (r.Kick != null)
+                    {
+                        if (r.Kick.activeSelf != kickable) r.Kick.SetActive(kickable);
+                        if (kickable && r.KickLabel != null && Time.unscaledTime > r.ConfirmUntil && r.KickLabel.text != Loc.T("KICK")) Loc.Set(r.KickLabel, "KICK");
+                    }
                 }
                 // size the box to the players: centred, as tall as its rows
                 if (_box != null)
@@ -165,7 +242,7 @@ namespace CanEmAllMP
                     _box.anchorMin = _box.anchorMax = new Vector2(0.5f, 0.5f);
                     _box.pivot = new Vector2(0.5f, 0.5f);
                     _box.anchoredPosition = new Vector2(0f, 40f);
-                    _box.sizeDelta = new Vector2(712f, h);
+                    _box.sizeDelta = new Vector2(812f, h);
                 }
             }
             catch (Exception e) { Plugin.Log.LogWarning("[UI] scoreboard refresh: " + e.Message); }

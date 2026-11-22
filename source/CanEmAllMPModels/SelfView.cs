@@ -214,12 +214,12 @@ namespace CanEmAllMPModels
 
         public void OnGUI()
         {
-            if (!Active) return;
+            if (!Active || EmoteWheel.StyledUi) return; // the emote wheel's game-style pill shows these hints
             try
             {
                 GUI.Box(new Rect(Screen.width / 2f - 170, Screen.height - 84, 340, 26), "");
                 GUI.Label(new Rect(Screen.width / 2f - 165, Screen.height - 82, 330, 24),
-                    "Mouse: look around   Scroll: zoom   Move: stop");
+                    Loc.T("Mouse: look around   Scroll: zoom   Move: stop"));
             }
             catch { }
         }

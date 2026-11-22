@@ -169,7 +169,7 @@ namespace CanEmAllMP
                 var ids = new List<int>();
                 for (int i = 0; i < n; i++) ids.Add(r.GetInt());
                 foreach (var id in ids) if (Apply(id)) applied++;
-                if (applied > 0) MpManager.Instance?.Feed($"Synced {applied} upgrade(s) from the host");
+                if (applied > 0) MpManager.Instance?.Note($"Synced {applied} upgrade(s) from the host");
             }
         }
 

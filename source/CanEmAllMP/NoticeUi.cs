@@ -95,6 +95,7 @@ namespace CanEmAllMP
             var trt = RT(text); trt.anchorMin = Vector2.zero; trt.anchorMax = Vector2.one; trt.pivot = new Vector2(0.5f, 0.5f);
             trt.anchoredPosition = Vector2.zero; trt.sizeDelta = new Vector2(-40f, 0f);
             t.alignment = TextAlignmentOptions.Midline; t.fontSize = 17; t.enableWordWrapping = false; t.text = "";
+            Loc.Unbind(t); t.enableAutoSizing = true; t.fontSizeMax = 17; t.fontSizeMin = 11; // very long translations shrink instead of spilling
 
             var brt = RT(box);
             brt.anchorMin = brt.anchorMax = new Vector2(0.5f, 0f); brt.pivot = new Vector2(0.5f, 0f);

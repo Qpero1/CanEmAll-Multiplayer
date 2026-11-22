@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using Il2CppInterop.Runtime;
 using TMPro;
@@ -153,17 +154,16 @@ namespace CanEmAllMP
 
         private static void InjectButton(Menu m)
         {
-            var settingsText = FindText(m.menuPanel.transform, "SETTINGS");
-            if (settingsText == null) { Plugin.Log.LogWarning("[UI] no SETTINGS text in the menu"); return; }
-            var btn = settingsText.GetComponentInParent<Button>();
-            var src = btn != null ? btn.gameObject : settingsText.transform.parent.gameObject;
+            // Find SETTINGS by object name / gear icon, never by its label: the label is translated.
+            var src = FindSettingsButton(m.menuPanel.transform);
+            if (src == null) { Plugin.Log.LogWarning("[UI] no SETTINGS button in the menu"); return; }
             var clone = Clone(src, src.transform.parent);
             if (clone == null) { Plugin.Log.LogWarning("[UI] clone returned nothing"); return; }
             clone.name = "MP_MultiplayerButton";
             clone.transform.SetSiblingIndex(src.transform.GetSiblingIndex()); // just above SETTINGS (below NEW GAME)
             Strip(clone); // TranslateText would put "SETTINGS" back
             var t = Label(clone.transform);
-            if (t != null) t.text = "MULTIPLAYER";
+            if (t != null) { Loc.Set(t, "MULTIPLAYER"); Loc.Fit(t); }
             var icon = Child(clone.transform, "Icon");
             var credIcon = Find(m.menuPanel.transform, "Credits");
             var spr = SpriteOf(Child(credIcon, "Icon"));
@@ -171,6 +171,24 @@ namespace CanEmAllMP
             OnClick(clone, () => OpenScreen());
             _mpButton = clone;
             Plugin.Log.LogInfo($"[UI] MULTIPLAYER button cloned from {Path(src.transform)}");
+        }
+
+        private static GameObject FindSettingsButton(Transform menu)
+        {
+            var buttons = Child(menu, "Buttons");
+            var byName = Child(buttons, "Settings");
+            if (byName != null && byName.GetComponent<Button>() != null) return byName.gameObject;
+            var all = menu.GetComponentsInChildren<Button>(true);
+            for (int i = 0; i < all.Length; i++)
+            {
+                var spr = SpriteOf(Child(all[i].transform, "Icon"));
+                if (spr != null && spr.name == "settings" && all[i].gameObject.name != "MP_MultiplayerButton") return all[i].gameObject;
+            }
+            var t = FindText(menu, (Loc.GameWord("settings") ?? "").ToUpperInvariant());
+            if (t == null) t = FindText(menu, "SETTINGS");
+            if (t == null) return null;
+            var b = t.GetComponentInParent<Button>();
+            return b != null ? b.gameObject : t.transform.parent.gameObject;
         }
 
         internal static TMP_Text FindText(Transform root, string upper)
@@ -184,10 +202,16 @@ namespace CanEmAllMP
         // ---------------------------------------------------------------- MULTIPLAYER screen
 
         private static GameObject _screen;
+        private static bool _locHooked;
         private static TMP_InputField _name, _addr, _port;
         private static TMP_Text _info, _status, _players, _hostLbl, _joinLbl, _ffLabel;
         private static GameObject _hostBtn, _joinBtn;
-        private static TMP_Dropdown _slot;
+        private static TMP_Dropdown _slot, _conn;
+        private static TMP_Text _addrLbl, _actLbl;
+        private static GameObject _actBtn;
+        private static int _tab; // 0 = HOST, 1 = JOIN, 2 = SAVES
+        private static GameObject _savesBtn;
+        private static readonly List<(GameObject line, GameObject row, Func<bool> show)> _rows = new List<(GameObject, GameObject, Func<bool>)>();
         private static Image[] _sw, _ffSw;
         private static GameObject[] _swSel, _ffSel;
         private static readonly Color FfOff = new Color(0.9f, 0.2f, 0.2f), FfOn = new Color(0.35f, 0.8f, 0.2f);
@@ -243,10 +267,15 @@ namespace CanEmAllMP
             scr.SetActive(false);
             scr.transform.SetSiblingIndex(settings.GetSiblingIndex() + 1); // keep the game's Fade overlay on top
             _screen = scr;
+            if (!_locHooked)
+            {
+                _locHooked = true;
+                Loc.Changed += () => { if (_screen != null) { RefreshSlots(); RefreshSaves(); ApplyMode(); } };
+            }
             var st = scr.transform;
 
             var title = Label(Child(st, "Title"));
-            if (title != null) title.text = "MULTIPLAYER";
+            if (title != null) { Loc.Set(title, "MULTIPLAYER"); Loc.Fit(title, 0.5f); title.enableWordWrapping = false; var trt = RT(title.transform); if (trt != null) trt.sizeDelta = new Vector2(600f, trt.sizeDelta.y); }
 
             Kill(Child(st, "Audio"));
             Kill(Child(st, "Graphics"));
@@ -255,16 +284,33 @@ namespace CanEmAllMP
             var tabs = Child(st, "Buttons");
             _hostBtn = Child(tabs, "General")?.gameObject;
             _joinBtn = Child(tabs, "Audio")?.gameObject;
-            Kill(Child(tabs, "Graphics"));
+            _savesBtn = Child(tabs, "Graphics")?.gameObject;
+            var gearIcon = SpriteOf(Child(_hostBtn != null ? _hostBtn.transform : null, "Icon"));
             var playIcon = SpriteOf(Child(Find(m.menuPanel.transform, "NewGame"), "Icon"));
             var profIcon = SpriteOf(Child(Find(m.menuPanel.transform, "Credits"), "Icon"));
-            _hostLbl = SetupTab(_hostBtn, "HOST GAME", playIcon);
-            _joinLbl = SetupTab(_joinBtn, "JOIN GAME", profIcon);
-            OnClick(_hostBtn, OnHostClicked);
-            OnClick(_joinBtn, OnJoinClicked);
+            _hostLbl = SetupTab(_hostBtn, "HOST", playIcon);
+            _joinLbl = SetupTab(_joinBtn, "JOIN", profIcon);
+            OnClick(_hostBtn, () => SelectTab(0));
+            OnClick(_joinBtn, () => SelectTab(1));
+            SetupTab(_savesBtn, "SAVES", gearIcon);
+            OnClick(_savesBtn, () => SelectTab(2));
 
             var back = Child(st, "Back");
             OnClick(back?.gameObject, CloseScreen);
+
+            // bottom-right action button (HOST LOBBY / JOIN LOBBY), cloned from BACK
+            if (back != null)
+            {
+                _actBtn = Clone(back.gameObject, st);
+                _actBtn.name = "MP_Action";
+                var ar = RT(_actBtn);
+                Place(ar, new Vector2(1f, 0f), new Vector2(1f, 0f), new Vector2(-35f, 25f), new Vector2(230f, ar != null ? ar.sizeDelta.y : 64f));
+                _actLbl = Label(_actBtn.transform);
+                if (_actLbl != null) { _actLbl.enableWordWrapping = false; var tr = RT(_actLbl.transform); if (tr != null) tr.sizeDelta = new Vector2(170f, tr.sizeDelta.y); Loc.Fit(_actLbl); }
+                var aic = Child(_actBtn.transform, "Icon");
+                if (aic != null && playIcon != null) aic.GetComponent<Image>().sprite = playIcon;
+                OnClick(_actBtn, OnActionClicked);
+            }
 
             // the content box: rebuild it from its own row templates
             var box = Child(st, "General");
@@ -283,25 +329,44 @@ namespace CanEmAllMP
             var ddImg = Find(tRow, "Dropdown")?.GetComponent<Image>();
             var outline = Find(tRow, "Outline");
 
-            Line(box, tLine);
-            _name = InputRow(box, tRow, betField, ddImg, "Name", "Player", 24, false, 231f, 0f);
-            Line(box, tLine);
-            SwatchRow(box, tRow, back, ddImg, outline);
-            Line(box, tLine);
-            SlotRow(box, tRow);
-            Line(box, tLine);
-            _addr = InputRow(box, tRow, betField, ddImg, "Address", "e.g. 123.45.67.89", 64, false, 231f, -100f);
-            PasteButton(_addr.transform.parent, back);
-            Line(box, tLine);
-            _port = InputRow(box, tRow, betField, ddImg, "Port", "7777", 5, true, 120f, 0f);
-            Line(box, tLine);
-            FriendlyFireRow(box, tRow, back, ddImg, outline);
-            Line(box, tLine);
-            _status = TextRow(box, tRow, "Status");
-            Line(box, tLine);
-            MaxRow(box, tRow);
-            Line(box, tLine);
-            _info = InfoRow(box, tRow, InfoText());
+            // every row gets its separator line; which rows show depends on the tab (and Online / Direct)
+            _rows.Clear();
+            void Row(Func<bool> show, Action make)
+            {
+                var line = Line(box, tLine);
+                int before = box.childCount;
+                make();
+                var row = box.childCount > before ? box.GetChild(box.childCount - 1).gameObject : null;
+                _rows.Add((line, row, show));
+            }
+            bool HostTab() => _tab == 0;
+            bool JoinTab() => _tab == 1;
+            bool SavesTab() => _tab == 2;
+            bool Play() => _tab != 2;
+            bool Direct() => NetSession.UseDirect && _tab != 2;
+            bool JoinByAddress() => _tab == 1 && !NetSession.UseSteam;
+            bool JoinSteam() => _tab == 1 && NetSession.UseSteam;
+            Row(Play, () => _name = InputRow(box, tRow, betField, ddImg, "Name", "Player", 24, false, 231f, 0f));
+            Row(Play, () => SwatchRow(box, tRow, back, ddImg, outline));
+            Row(Play, () => ConnRow(box, tRow));
+            Row(SavesTab, () => _svSlot = ActionDropdown(box, tRow, back, "Save", "CLEAR", () => SaveAction(0), out _svClearLbl, v => { _svSlotIdx = v; RefreshSaves(); }));
+            Row(SavesTab, () => _svTarget = ActionDropdown(box, tRow, back, "Copy it to", "COPY", () => SaveAction(1), out _svCopyLbl, v => _svTargetIdx = v));
+            Row(SavesTab, () => _svBackup = ActionDropdown(box, tRow, back, "Backup", "RESTORE", () => SaveAction(2), out _svRestoreLbl, v => _svBackupIdx = v));
+            Row(HostTab, () => SlotRow(box, tRow));
+            Row(JoinSteam, () => FriendRow(box, tRow, back));
+            Row(JoinByAddress, () =>
+            {
+                _addr = InputRow(box, tRow, betField, ddImg, "Address", "e.g. 123.45.67.89", 64, false, 231f, -100f);
+                _addrLbl = Label(_addr.transform.parent.parent);
+                PasteButton(_addr.transform.parent, back);
+            });
+            Row(Direct, () => _port = InputRow(box, tRow, betField, ddImg, "Port", "7777", 5, true, 120f, 0f));
+            Row(HostTab, () => FriendlyFireRow(box, tRow, back, ddImg, outline));
+            Row(HostTab, () => PauseRow(box, tRow, back, ddImg, outline));
+            Row(HostTab, () => MaxRow(box, tRow));
+            Row(() => true, () => _status = TextRow(box, tRow, "Status", true));
+            Row(() => true, () => _info = InfoRow(box, tRow, InfoText()));
+            _boxRt = RT(box); _boxLg = box.GetComponent<VerticalLayoutGroup>();
 
             foreach (var o in old) Kill(o);
             Strip(scr);
@@ -314,23 +379,24 @@ namespace CanEmAllMP
             var t = Label(b.transform);
             if (t != null)
             {
-                t.text = text;
+                Loc.Set(t, text);
                 t.enableWordWrapping = false;
                 var r = RT(t.transform); if (r != null) r.sizeDelta = new Vector2(150f, r.sizeDelta.y);
+                Loc.Fit(t);
             }
             var ic = Child(b.transform, "Icon");
             if (ic != null && icon != null) ic.GetComponent<Image>().sprite = icon;
             return t;
         }
 
-        internal static void Line(Transform box, Transform tLine) => Clone(tLine.gameObject, box);
+        internal static GameObject Line(Transform box, Transform tLine) => Clone(tLine.gameObject, box);
 
         internal static Transform NewRow(Transform box, Transform tRow, string label, bool keepDropdown)
         {
             var row = Clone(tRow.gameObject, box).transform;
             row.name = "MP_" + label;
             var l = Label(row);
-            if (l != null) l.text = label;
+            if (l != null) { Loc.Set(l, label); Loc.Fit(l, 0.6f); }
             if (!keepDropdown) Kill(Child(Child(row, "Image"), "Dropdown"));
             return row;
         }
@@ -357,24 +423,37 @@ namespace CanEmAllMP
                 f.textComponent.alignment = TextAlignmentOptions.MidlineLeft;
             }
             var ph = f.placeholder != null ? f.placeholder.TryCast<TMP_Text>() : null;
-            if (ph != null) { ph.text = placeholder; ph.color = new Color(1f, 1f, 1f, 0.35f); ph.fontSize = 14; ph.alignment = TextAlignmentOptions.MidlineLeft; }
+            if (ph != null) { Loc.Set(ph, placeholder); Loc.Fit(ph, 0.6f); ph.color = new Color(1f, 1f, 1f, 0.35f); ph.fontSize = 14; ph.alignment = TextAlignmentOptions.MidlineLeft; }
             return f;
         }
 
         private static void PasteButton(Transform holder, Transform back)
         {
-            if (back == null) return;
+            SmallButton(holder, back, "PASTE", () =>
+            {
+                string c = null;
+                try { c = GUIUtility.systemCopyBuffer; } catch { }
+                if (!string.IsNullOrWhiteSpace(c)) _addr.text = c.Trim();
+            });
+        }
+
+        /// A small button (cloned from BACK) at the right end of a row's control area.
+        internal static TMP_Text SmallButton(Transform holder, Transform back, string text, Action click)
+        {
+            if (back == null || holder == null) return null;
             var b = Clone(back.gameObject, holder);
-            b.name = "Paste";
+            b.name = "Btn_" + text;
             Kill(Child(b.transform, "Icon"));
             const float k = 0.6f; // shrink by sizing (ButtonAnimation resets localScale to 1 on hover)
             var t = Label(b.transform);
             if (t != null)
             {
-                t.text = "PASTE";
+                Loc.Set(t, text);
                 Stretch(RT(t.transform));
                 t.alignment = TextAlignmentOptions.Center;
                 t.fontSize = t.fontSize * k;
+                t.enableWordWrapping = false;
+                Loc.Fit(t, 0.5f);
             }
             var img = b.GetComponent<Image>();
             if (img != null) img.pixelsPerUnitMultiplier = img.pixelsPerUnitMultiplier / k;
@@ -382,12 +461,8 @@ namespace CanEmAllMP
             if (rc != null) rc.sizeDelta = rc.sizeDelta * k;
             var r = RT(b);
             Place(r, new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(0f, 0f), new Vector2(150f * k, 64f * k));
-            OnClick(b, () =>
-            {
-                string c = null;
-                try { c = GUIUtility.systemCopyBuffer; } catch { }
-                if (!string.IsNullOrWhiteSpace(c)) _addr.text = c.Trim();
-            });
+            OnClick(b, click);
+            return t;
         }
 
         /// A row of small clickable colour squares (cloned from a game button), with a white ring on the selected one.
@@ -432,6 +507,20 @@ namespace CanEmAllMP
             }, out _sw, out _swSel);
         }
 
+        private static Image[] _psSw; private static GameObject[] _psSel; private static TMP_Text _psLabel;
+
+        private static void PauseRow(Transform box, Transform tRow, Transform back, Image ddImg, Transform outline)
+        {
+            var row = NewRow(box, tRow, "Multiplayer pause", false);
+            _psLabel = Label(row);
+            Swatches(Child(row, "Image"), back, ddImg, outline, new[] { FfOff, FfOn }, idx =>
+            {
+                if (Net.IsClient) return; // the host decides
+                Plugin.SharedPause.Value = idx == 1;
+                Refresh();
+            }, out _psSw, out _psSel);
+        }
+
         private static void FriendlyFireRow(Transform box, Transform tRow, Transform back, Image ddImg, Transform outline)
         {
             var row = NewRow(box, tRow, "Friendly fire", false);
@@ -459,7 +548,17 @@ namespace CanEmAllMP
                 var t = dd != null ? dd.template : null;
                 if (t == null) return;
                 int n = dd.options != null ? dd.options.Count : 2;
-                t.sizeDelta = new Vector2(t.sizeDelta.x, n * 28f + 10f);
+                // longer translations: shrink instead of spilling out of the box
+                if (dd.captionText != null) { dd.captionText.enableWordWrapping = false; Loc.Fit(dd.captionText, 0.6f); }
+                if (dd.itemText != null) { dd.itemText.enableWordWrapping = false; Loc.Fit(dd.itemText, 0.6f); }
+                t.sizeDelta = new Vector2(t.sizeDelta.x, n * 28f + 8f);
+                // the template's two corner pieces stick out above the list when it opens upwards
+                // (they look like a half-hidden extra slot): hide them
+                for (int i = 0; i < t.childCount; i++)
+                {
+                    var c = t.GetChild(i);
+                    if (c.name == "Image" || c.name == "Image.1") c.gameObject.SetActive(false);
+                }
             }
             catch (Exception e) { Plugin.Log.LogWarning("[UI] dropdown size: " + e.Message); }
         }
@@ -474,11 +573,10 @@ namespace CanEmAllMP
             if (comps != null)
                 for (int i = 0; i < comps.Length && _max == null; i++) _max = comps[i]?.TryCast<TMP_Dropdown>();
             if (_max == null) { Plugin.Log.LogWarning("[UI] max players: dropdown type not usable"); return; }
-            var opts = new Il2CppSystem.Collections.Generic.List<string>();
+            var opts = new List<string>();
             for (int n = 2; n <= 8; n++) opts.Add(n.ToString());
             opts.Add("Unlimited");
-            _max.ClearOptions();
-            _max.AddOptions(opts);
+            Loc.SetOptions(_max, opts);
             FitDropdown(_max);
             int v = Plugin.MaxPlayers.Value;
             _max.SetValueWithoutNotify(v <= 0 ? 7 : Mathf.Clamp(v, 2, 8) - 2);
@@ -488,6 +586,244 @@ namespace CanEmAllMP
             {
                 try { Plugin.MaxPlayers.Value = i >= 7 ? 0 : i + 2; } catch { }
             })));
+        }
+
+        // connection type: Online (lobby code) / Direct IP
+        private static void ConnRow(Transform box, Transform tRow)
+        {
+            var row = NewRow(box, tRow, "Connection", true);
+            var dd = Find(row, "Dropdown");
+            var comps = dd != null ? dd.GetComponents(Il2CppType.Of<Component>()) : null;
+            if (comps != null)
+                for (int i = 0; i < comps.Length && _conn == null; i++) _conn = comps[i]?.TryCast<TMP_Dropdown>();
+            if (_conn == null) { Plugin.Log.LogWarning("[UI] connection: dropdown type not usable"); return; }
+            var opts = new List<string> { "Online (lobby code)", "Steam (friends)", "Direct IP (port forward)" };
+            Loc.SetOptions(_conn, opts);
+            FitDropdown(_conn);
+            _conn.SetValueWithoutNotify(ConnIndex());
+            _conn.RefreshShownValue();
+            _conn.onValueChanged = new TMP_Dropdown.DropdownEvent();
+            _conn.onValueChanged.AddListener(DelegateSupport.ConvertDelegate<UnityAction<int>>(new Action<int>(i =>
+            {
+                try
+                {
+                    if (Net.Active) { _conn.SetValueWithoutNotify(ConnIndex()); return; }
+                    SaveFields(); // keep what was typed for the old mode
+                    Plugin.Connection.Value = i == 1 ? "Steam" : i == 2 ? "Direct" : "Online";
+                    _friendsAt = 0f;
+                    LoadFields();
+                    Refresh();
+                }
+                catch (Exception e) { Plugin.Log.LogWarning("[UI] connection change: " + e.Message); }
+            })));
+        }
+
+        private static int ConnIndex() => NetSession.UseSteam ? 1 : NetSession.UseDirect ? 2 : 0;
+
+        // ---------------------------------------------------------------- Steam friends (JOIN tab, Steam mode)
+
+        private static TMP_Dropdown _friends;
+        private static List<SteamApi.Host> _friendHosts = new List<SteamApi.Host>();
+        private static float _friendsAt;
+        private static string _friendsKey = "";
+
+        private static void FriendRow(Transform box, Transform tRow, Transform back)
+        {
+            var row = NewRow(box, tRow, "Friend", true);
+            var dd = Find(row, "Dropdown");
+            var comps = dd != null ? dd.GetComponents(Il2CppType.Of<Component>()) : null;
+            if (comps != null)
+                for (int i = 0; i < comps.Length && _friends == null; i++) _friends = comps[i]?.TryCast<TMP_Dropdown>();
+            if (_friends == null) { Plugin.Log.LogWarning("[UI] friends: dropdown type not usable"); return; }
+            var drt = RT(dd);
+            if (drt != null) { drt.anchoredPosition = new Vector2(-100f, drt.anchoredPosition.y); }
+            _friends.onValueChanged = new TMP_Dropdown.DropdownEvent();
+            _friends.onValueChanged.AddListener(DelegateSupport.ConvertDelegate<UnityAction<int>>(new Action<int>(v =>
+            {
+                try { if (v >= 0 && v < _friendHosts.Count) Plugin.LastSteamHost.Value = _friendHosts[v].Id.ToString(); } catch { }
+            })));
+            SmallButton(Child(row, "Image"), back, "REFRESH", () => { _friendsAt = 0f; RefreshFriends(true); });
+            RefreshFriends(true);
+        }
+
+        /// Friends who are hosting right now (Steam rich presence), re-read every few seconds while the JOIN tab shows.
+        private static void RefreshFriends(bool force)
+        {
+            if (_friends == null) return;
+            if (!force && Time.unscaledTime < _friendsAt) return;
+            _friendsAt = Time.unscaledTime + 3f;
+            try
+            {
+                var opts = new List<string>();
+                if (!SteamApi.Available) { _friendHosts.Clear(); opts.Add(SteamApi.Error ?? "Steam isn't running"); }
+                else
+                {
+                    _friendHosts = SteamApi.FriendHosts(true);
+                    foreach (var h in _friendHosts)
+                        opts.Add(h.Version == NetSession.ModVersion ? h.Name : Loc.F("{0} (mod v{1})", h.Name, h.Version));
+                    if (opts.Count == 0) opts.Add("No friends hosting right now");
+                }
+                string key = string.Join("|", opts);
+                if (key == _friendsKey) return;   // unchanged: don't reset the open list
+                _friendsKey = key;
+                Loc.SetOptions(_friends, opts);
+                FitDropdown(_friends);
+                int sel = 0;
+                for (int i = 0; i < _friendHosts.Count; i++) if (_friendHosts[i].Id.ToString() == Plugin.LastSteamHost.Value) sel = i;
+                if (_friendHosts.Count > 0) Plugin.LastSteamHost.Value = _friendHosts[sel].Id.ToString();
+                _friends.SetValueWithoutNotify(sel);
+                _friends.RefreshShownValue();
+                _friends.interactable = _friendHosts.Count > 0;
+            }
+            catch (Exception e) { Plugin.Log.LogWarning("[UI] friends: " + e.Message); }
+        }
+
+        /// Address row = lobby code in Online mode; the port row only matters for Direct.
+        private static void ApplyMode()
+        {
+            bool online = NetSession.UseOnline;
+            try
+            {
+                if (_conn != null && _conn.value != ConnIndex()) { _conn.SetValueWithoutNotify(ConnIndex()); _conn.RefreshShownValue(); }
+                if (_addrLbl != null) Loc.Set(_addrLbl, online ? "Lobby code" : "Address");
+                if (_addr != null)
+                {
+                    _addr.characterLimit = online ? 8 : 64;
+                    var ph = _addr.placeholder != null ? _addr.placeholder.TryCast<TMP_Text>() : null;
+                    if (ph != null) Loc.Set(ph, online ? "e.g. AX8SWK" : "e.g. 123.45.67.89");
+                }
+                ApplyRows();
+                if (_info != null) _info.text = InfoText();
+            }
+            catch (Exception e) { Plugin.Log.LogWarning("[UI] mode: " + e.Message); }
+        }
+
+        // ---------------------------------------------------------------- SAVES tab
+
+        private static TMP_Dropdown _svSlot, _svTarget, _svBackup;
+        private static TMP_Text _svClearLbl, _svCopyLbl, _svRestoreLbl;
+        private static int _svSlotIdx, _svTargetIdx = 1, _svBackupIdx;
+        private static string _svMsg = "";
+        private static List<FileInfo> _svBackups = new List<FileInfo>();
+        private static int _confirm = -1; private static float _confirmUntil;
+
+        /// A row with a dropdown and a small button to its right.
+        private static TMP_Dropdown ActionDropdown(Transform box, Transform tRow, Transform back, string label, string button, Action click,
+                                                   out TMP_Text buttonLabel, Action<int> changed)
+        {
+            buttonLabel = null;
+            var row = NewRow(box, tRow, label, true);
+            var holder = Child(row, "Image");
+            var ddT = Find(row, "Dropdown");
+            TMP_Dropdown dd = null;
+            var comps = ddT != null ? ddT.GetComponents(Il2CppType.Of<Component>()) : null;
+            if (comps != null) for (int i = 0; i < comps.Length && dd == null; i++) dd = comps[i]?.TryCast<TMP_Dropdown>();
+            if (dd == null) { Plugin.Log.LogWarning("[UI] saves: dropdown type not usable"); return null; }
+            var drt = RT(ddT);
+            if (drt != null) { drt.anchoredPosition = new Vector2(-145f, drt.anchoredPosition.y); drt.sizeDelta = new Vector2(320f, drt.sizeDelta.y); } // leave room for the button on the right
+            dd.onValueChanged = new TMP_Dropdown.DropdownEvent();
+            dd.onValueChanged.AddListener(DelegateSupport.ConvertDelegate<UnityAction<int>>(new Action<int>(v =>
+            {
+                try { _confirm = -1; changed(v); } catch (Exception e) { Plugin.Log.LogWarning("[UI] saves: " + e.Message); }
+            })));
+            buttonLabel = SmallButton(holder, back, button, click);
+            return dd;
+        }
+
+        private static string SlotName(int slot) => slot <= 0 ? "Local save" : "Slot " + slot;
+
+        /// Rebuild the three lists from the files on disk.
+        private static void RefreshSaves()
+        {
+            try
+            {
+                if (_svSlot != null)
+                {
+                    var opts = new List<string>();
+                    for (int i = 1; i <= SaveSlots.Count; i++) opts.Add(SaveSlots.Describe(i));
+                    opts.Add(SaveSlots.Describe(0));
+                    Loc.SetOptions(_svSlot, opts); FitDropdown(_svSlot);
+                    _svSlot.SetValueWithoutNotify(_svSlotIdx); _svSlot.RefreshShownValue();
+                }
+                if (_svTarget != null)
+                {
+                    var opts = new List<string>();
+                    for (int i = 1; i <= SaveSlots.Count; i++) opts.Add(SlotName(i) + (SaveSlots.Exists(i) ? " (overwrite)" : " (empty)"));
+                    opts.Add(SlotName(0) + (SaveSlots.Exists(0) ? " (overwrite)" : " (empty)"));
+                    Loc.SetOptions(_svTarget, opts); FitDropdown(_svTarget);
+                    _svTarget.SetValueWithoutNotify(_svTargetIdx); _svTarget.RefreshShownValue();
+                }
+                if (_svBackup != null)
+                {
+                    _svBackups = SaveBackups.List(SlotOfIndex(_svSlotIdx));
+                    var opts = new List<string>();
+                    if (_svBackups.Count == 0) opts.Add("No backups yet");
+                    foreach (var f in _svBackups.Take(12)) opts.Add(SaveBackups.Describe(f));
+                    _svBackupIdx = Mathf.Clamp(_svBackupIdx, 0, Math.Max(0, Math.Min(12, _svBackups.Count) - 1));
+                    Loc.SetOptions(_svBackup, opts); FitDropdown(_svBackup);
+                    _svBackup.SetValueWithoutNotify(_svBackupIdx); _svBackup.RefreshShownValue();
+                }
+            }
+            catch (Exception e) { Plugin.Log.LogWarning("[UI] saves refresh: " + e.Message); }
+        }
+
+        /// 0 = clear, 1 = copy, 2 = restore. First click arms it ("SURE?"), the second does it.
+        private static void SaveAction(int which)
+        {
+            if (Net.Active) { _svMsg = "Leave the session first"; return; }
+            if (_confirm != which || Time.unscaledTime > _confirmUntil)
+            {
+                _confirm = which; _confirmUntil = Time.unscaledTime + 3f;
+                SetConfirmLabels();
+                return;
+            }
+            _confirm = -1; SetConfirmLabels();
+            int slot = SlotOfIndex(_svSlotIdx);
+            try
+            {
+                switch (which)
+                {
+                    case 0:
+                        if (!SaveSlots.Exists(slot)) { _svMsg = SlotName(slot) + " is already empty"; break; }
+                        SaveBackups.BackupNow(slot, "before clearing");
+                        SaveSlots.Delete(slot);
+                        _svMsg = SlotName(slot) + " cleared (a backup was kept)";
+                        break;
+                    case 1:
+                        int to = SlotOfIndex(_svTargetIdx);
+                        if (to == slot) { _svMsg = "Pick a different slot to copy to"; break; }
+                        if (!SaveSlots.Exists(slot)) { _svMsg = SlotName(slot) + " is empty - nothing to copy"; break; }
+                        if (SaveSlots.Exists(to)) SaveBackups.BackupNow(to, "before overwriting");
+                        SaveSlots.Copy(slot, to);
+                        _svMsg = $"Copied {SlotName(slot)} to {SlotName(to)}";
+                        break;
+                    case 2:
+                        if (_svBackupIdx >= _svBackups.Count) { _svMsg = "No backup to restore"; break; }
+                        var f = _svBackups[_svBackupIdx];
+                        if (SaveSlots.Exists(slot)) SaveBackups.BackupNow(slot, "before restoring");
+                        File.Copy(f.FullName, SaveSlots.PathFor(slot), true);
+                        _svMsg = $"Restored {SlotName(slot)} from {SaveBackups.Describe(f)}";
+                        break;
+                }
+                Plugin.Log.LogInfo("[saves] " + _svMsg);
+            }
+            catch (Exception e) { _svMsg = "Failed: " + e.Message; Plugin.Log.LogWarning("[saves] " + e); }
+            // the game keeps the normal save in memory and the menu's CONTINUE button depends on it
+            try { SaveSlots.ResetToLocal(true); var m = Menu.Instance; if (m != null && m.continueGameButton != null) m.continueGameButton.SetActive(SaveSlots.Exists(0)); } catch { }
+            RefreshSaves();
+            RefreshSlots();
+        }
+
+        private static void TickConfirm()
+        {
+            if (_confirm >= 0 && Time.unscaledTime > _confirmUntil) { _confirm = -1; SetConfirmLabels(); }
+        }
+
+        private static void SetConfirmLabels()
+        {
+            if (_svClearLbl != null) Loc.Set(_svClearLbl, _confirm == 0 ? "SURE?" : "CLEAR");
+            if (_svCopyLbl != null) Loc.Set(_svCopyLbl, _confirm == 1 ? "SURE?" : "COPY");
+            if (_svRestoreLbl != null) Loc.Set(_svRestoreLbl, _confirm == 2 ? "SURE?" : "RESTORE");
         }
 
         // dropdown index -> save slot: Slot 1, Slot 2, Slot 3, Local save
@@ -516,11 +852,10 @@ namespace CanEmAllMP
             if (_slot == null) return;
             try
             {
-                var opts = new Il2CppSystem.Collections.Generic.List<string>();
+                var opts = new List<string>();
                 for (int i = 1; i <= SaveSlots.Count; i++) opts.Add(SaveSlots.Describe(i));
                 opts.Add(SaveSlots.Describe(0));
-                _slot.ClearOptions();
-                _slot.AddOptions(opts);
+                Loc.SetOptions(_slot, opts);
                 FitDropdown(_slot);
                 _slot.SetValueWithoutNotify(IndexOfSlot(Plugin.HostSlot.Value));
                 _slot.RefreshShownValue();
@@ -528,15 +863,17 @@ namespace CanEmAllMP
             catch (Exception e) { Plugin.Log.LogWarning("[UI] save slots: " + e.Message); }
         }
 
-        internal static TMP_Text TextRow(Transform box, Transform tRow, string label)
+        internal static TMP_Text TextRow(Transform box, Transform tRow, string label, bool wrap = false)
         {
             var row = NewRow(box, tRow, label, false);
+            if (wrap) { var rr = RT(row); rr.sizeDelta = new Vector2(rr.sizeDelta.x, Mathf.Max(rr.sizeDelta.y, 48f)); }
             var l = Label(row);
             var v = Clone(l.gameObject, row).GetComponent<TMP_Text>();
             v.gameObject.name = "Value";
-            Place(RT(v.transform), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), Vector2.zero, new Vector2(420f, 24f));
+            Place(RT(v.transform), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), Vector2.zero, new Vector2(420f, wrap ? 44f : 24f));
             v.alignment = TextAlignmentOptions.MidlineRight;
-            v.fontSize = 14; v.enableWordWrapping = false; v.overflowMode = TextOverflowModes.Ellipsis;
+            v.fontSize = 14; v.enableWordWrapping = wrap; v.overflowMode = TextOverflowModes.Ellipsis;
+            v.enableAutoSizing = true; v.fontSizeMin = wrap ? 10 : 9; v.fontSizeMax = 14;
             v.text = "";
             return v;
         }
@@ -545,19 +882,37 @@ namespace CanEmAllMP
         private static string InfoText()
         {
             string port = _port != null && !string.IsNullOrWhiteSpace(_port.text) ? _port.text.Trim() : Plugin.Port.Value.ToString();
-            _infoPort = port;
-            return "HOST: press HOST GAME - your save loads and the session opens. Forward UDP port " + port + " on your router and give friends your public IP.\n" +
-                   "JOIN: type the host's address and press JOIN GAME - you'll play on the host's save.";
+            _infoPort = InfoKey(port);
+            if (_tab == 2)
+                return Loc.T("Multiplayer saves (and your normal save). Backups are made automatically while you host, and before anything here deletes or overwrites a save - so a mistake can always be undone with RESTORE. Click a button twice to confirm.");
+            bool online = NetSession.UseOnline;
+            bool steam = NetSession.UseSteam;
+            string pauseInfo = "\n" + Loc.T("Multiplayer pause: green = pausing pauses everyone. Red = Esc only opens your own menu and the game keeps running, so nobody can pause the day (like Risk of Rain 2).");
+            if (_tab == 0 && steam)
+                return Loc.T("Press HOST LOBBY - your save loads and your Steam friends see you in their JOIN tab (Connection: Steam). Everyone needs the game on Steam. Press START GAME in the lobby when everyone's in.") + pauseInfo;
+            if (steam)
+                return Loc.T("Pick a Steam friend who is hosting and press JOIN LOBBY. They show up here while they host with Connection: Steam. You'll play on the host's save - your own save is never touched.");
+            if (_tab == 0)
+                return (online
+                    ? Loc.T("Press HOST LOBBY - your save loads and you get a lobby code (copied to your clipboard). Send it to your friends - no port forwarding needed. Press START GAME in the lobby when everyone's in.")
+                    : Loc.F("Press HOST LOBBY - your save loads and the session opens. Forward UDP port {0} on your router and give friends your public IP.", port)) + pauseInfo;
+            return online
+                ? Loc.T("Paste the host's lobby code and press JOIN LOBBY. You'll play on the host's save - your own save is never touched.")
+                : Loc.T("Type the host's address (and port) and press JOIN LOBBY. You'll play on the host's save - your own save is never touched.");
         }
+
+        private static string InfoKey(string port) => port + "|" + Plugin.Connection.Value + "|" + _tab + "|" + Loc.Lang;
 
         private static TMP_Text InfoRow(Transform box, Transform tRow, string text)
         {
             var row = NewRow(box, tRow, "Info", false);
             Kill(Child(row, "Image"));
-            var rr = RT(row); rr.sizeDelta = new Vector2(rr.sizeDelta.x, 62f);
+            var rr = RT(row); rr.sizeDelta = new Vector2(rr.sizeDelta.x, 96f);
             var l = Label(row);
+            Loc.Unbind(l);
             Stretch(RT(l.transform));
             l.text = text; l.fontSize = 13; l.enableWordWrapping = true;
+            l.enableAutoSizing = true; l.fontSizeMax = 13; l.fontSizeMin = 9; l.overflowMode = TextOverflowModes.Truncate;
             l.alignment = TextAlignmentOptions.TopLeft;
             l.color = new Color(l.color.r, l.color.g, l.color.b, 0.8f);
             return l;
@@ -572,6 +927,7 @@ namespace CanEmAllMP
             _name.text = mp.FieldName;
             _addr.text = mp.FieldAddress;
             _port.text = mp.FieldPort;
+            ApplyMode();
             RefreshSlots();
         }
 
@@ -580,10 +936,97 @@ namespace CanEmAllMP
             try { MpManager.Instance?.ApplyFields(_name.text, _addr.text, _port.text); } catch { }
         }
 
+        /// HOST / JOIN tabs: show that tab's options; the bottom-right button does the action.
+        private static void SelectTab(int tab) => SelectTab(tab, false);
+        private static void SelectTab(int tab, bool force)
+        {
+            if (Net.Active && !force) return; // can't switch while hosting / joined
+            if (!force) SaveFields();
+            _tab = tab;
+            if (tab == 2) RefreshSaves();
+            ApplyRows();
+            if (_info != null) _info.text = InfoText();
+            if (!force) Refresh();
+        }
+
+        private static void ApplyRows()
+        {
+            foreach (var (line, row, show) in _rows)
+            {
+                bool on = show();
+                if (line != null && line.activeSelf != on) line.SetActive(on);
+                if (row != null && row.activeSelf != on) row.SetActive(on);
+            }
+            // the selected tab looks normal, the other one is dimmed
+            TintTab(_hostBtn, _tab == 0);
+            TintTab(_joinBtn, _tab == 1);
+            TintTab(_savesBtn, _tab == 2);
+            if (_actBtn != null && _actBtn.activeSelf == (_tab == 2)) _actBtn.SetActive(_tab != 2);
+            var ic = _actBtn != null ? Child(_actBtn.transform, "Icon") : null;
+            var tabBtn = _tab == 0 ? _hostBtn : _tab == 1 ? _joinBtn : _hostBtn;
+            var src = tabBtn != null ? Child(tabBtn.transform, "Icon") : null;
+            if (ic != null && src != null) ic.GetComponent<Image>().sprite = src.GetComponent<Image>().sprite;
+            FitInfo();
+        }
+
+        private static RectTransform _boxRt;
+        private static VerticalLayoutGroup _boxLg;
+
+        /// The info text gets whatever height is left in the panel, stopping above the HOST LOBBY / JOIN LOBBY
+        /// button (it sits over the panel's bottom-right corner); the text shrinks if it needs more room.
+        private static void FitInfo()
+        {
+            try
+            {
+                if (_info == null || _boxRt == null || _boxRt.rect.height < 100f) return;
+                var infoRow = RT(_info.transform.parent);
+                if (infoRow == null) return;
+                float top = _boxLg != null ? _boxLg.padding.top : 0f;
+                float bottom = _boxLg != null ? _boxLg.padding.bottom : 0f;
+                float spacing = _boxLg != null ? _boxLg.spacing : 0f;
+                if (_actBtn != null && _actBtn.activeSelf)
+                {
+                    var ab = RT(_actBtn);
+                    float btnTop = ab != null ? ab.anchoredPosition.y + ab.sizeDelta.y : 89f;   // above the screen's bottom edge
+                    float boxBottom = _boxRt.offsetMin.y > 0f ? _boxRt.offsetMin.y : 25f;
+                    bottom = Mathf.Max(bottom, btnTop - boxBottom + 6f);
+                }
+                float used = 0f; int n = 0;
+                var box = _boxRt.transform;
+                for (int i = 0; i < box.childCount; i++)
+                {
+                    var c = box.GetChild(i);
+                    if (!c.gameObject.activeSelf) continue;
+                    n++;
+                    if (c == infoRow.transform) continue;
+                    var crt = RT(c);
+                    if (crt != null) used += crt.sizeDelta.y;
+                }
+                float h = _boxRt.rect.height - top - bottom - used - spacing * Mathf.Max(0, n - 1);
+                h = Mathf.Clamp(h, 36f, 200f);
+                if (Mathf.Abs(infoRow.sizeDelta.y - h) > 0.5f) infoRow.sizeDelta = new Vector2(infoRow.sizeDelta.x, h);
+                _info.fontSizeMin = 8f;
+            }
+            catch (Exception e) { Plugin.Log.LogWarning("[UI] info size: " + e.Message); }
+        }
+
+        private static void TintTab(GameObject b, bool selected)
+        {
+            var img = b != null ? b.GetComponent<Image>() : null;
+            if (img != null) img.color = selected ? Color.white : new Color(0.62f, 0.62f, 0.62f, 1f);
+        }
+
+        private static void OnActionClicked()
+        {
+            if (Net.Active) { SaveFields(); MpManager.Instance?.Disconnect(); return; }
+            if (_tab == 0) OnHostClicked(); else if (_tab == 1) OnJoinClicked();
+        }
+
         private static void OnHostClicked()
         {
             SaveFields();
             if (Net.Active) { MpManager.Instance?.Disconnect(); return; }
+            if (NetSession.UseSteam && !SteamApi.Available) { Net.Status = SteamApi.Error ?? "Steam isn't running"; return; }
             if (!GameApi.InGame)
             {
                 if (!SaveSlots.RedirectWorks(Plugin.HostSlot.Value))
@@ -592,16 +1035,16 @@ namespace CanEmAllMP
                     return;
                 }
                 SaveSlots.Use(Plugin.HostSlot.Value); // the lobby hosts this save
-                if (!Net.Host(Plugin.Port.Value)) return; // Status says why (port in use...)
+                if (!Net.StartHost()) return; // Status says why (port in use...)
                 MultiplayerSession = true;
-                MpManager.Instance?.Feed($"Lobby open on UDP {Plugin.Port.Value}. Friends join with your public IP.");
+                MpManager.Instance?.Note(Net.Online ? "Lobby open - getting a lobby code..." : $"Lobby open on UDP {Plugin.Port.Value}. Friends join with your public IP.");
                 _screen.SetActive(false);
                 LobbyUi.Show();
                 return;
             }
             if (GameApi.InGame)
             {
-                if (Net.Host(Plugin.Port.Value)) MpManager.Instance?.Feed($"Hosting on UDP {Plugin.Port.Value}. Friends join with your public IP.");
+                if (Net.StartHost()) MpManager.Instance?.Note(Net.HostingText);
                 return;
             }
             HostFromMenu();
@@ -632,20 +1075,51 @@ namespace CanEmAllMP
             if (Time.unscaledTime - _hostArmedAt > 120f) { _hostArmed = false; return; }
             if (!GameApi.InGame) return;
             _hostArmed = false;
-            if (Net.Host(Plugin.Port.Value)) MpManager.Instance?.Feed($"Hosting on UDP {Plugin.Port.Value}. Friends join with your public IP.");
+            if (Net.StartHost()) MpManager.Instance?.Note(Net.HostingText);
         }
 
         private static void OnJoinClicked()
         {
             SaveFields();
             if (Net.Active) return;
-            if (string.IsNullOrWhiteSpace(Plugin.LastAddress.Value)) { Net.Status = "Type the host's address first"; return; }
+            if (NetSession.UseSteam)
+            {
+                if (!SteamApi.Available) { Net.Status = SteamApi.Error ?? "Steam isn't running"; return; }
+                if (_friendHosts.Count == 0) { Net.Status = "No friends hosting right now"; return; }
+            }
+            else if (NetSession.UseOnline)
+            {
+                if (OnlineLink.NormalizeCode(Plugin.LastCode.Value) == null) { Net.Status = "Type the host's 6-character lobby code first"; return; }
+            }
+            else if (string.IsNullOrWhiteSpace(Plugin.LastAddress.Value)) { Net.Status = "Type the host's address first"; return; }
             MultiplayerSession = true;
-            if (Net.Join(Plugin.LastAddress.Value.Trim(), Plugin.Port.Value))
+            if (Net.StartJoin())
             {
                 _screen.SetActive(false);
                 LobbyUi.Show();
             }
+        }
+
+        /// Steam "Join Game" (friends list / profile): join that friend through Steam straight from the main menu.
+        public static void JoinSteamFriend(ulong hostId)
+        {
+            try
+            {
+                Plugin.Connection.Value = "Steam";
+                Plugin.LastSteamHost.Value = hostId.ToString();
+                MultiplayerSession = true;
+                if (Net.StartJoin())
+                {
+                    if (_screen != null) _screen.SetActive(false);
+                    LobbyUi.Show();
+                }
+                else
+                {
+                    MultiplayerSession = false;
+                    MpManager.Instance?.Toast(Loc.T(Net.Status));
+                }
+            }
+            catch (Exception e) { Plugin.Log.LogWarning("[Steam] join: " + e); }
         }
 
         /// Back from the lobby (left / host gone): show the MULTIPLAYER screen again.
@@ -689,18 +1163,26 @@ namespace CanEmAllMP
             try
             {
                 bool active = Net.Active;
-                if (_hostLbl != null) _hostLbl.text = active ? (Net.IsHost ? "STOP HOSTING" : "DISCONNECT") : "HOST GAME";
-                if (_joinBtn != null && _joinBtn.activeSelf == active) _joinBtn.SetActive(!active);
+                if (active && _tab != (Net.IsHost ? 0 : 1)) SelectTab(Net.IsHost ? 0 : 1, true);
+                if (_actLbl != null)
+                {
+                    string want = Loc.T(active ? (Net.IsHost ? "STOP HOSTING" : "DISCONNECT") : _tab == 0 ? "HOST LOBBY" : "JOIN LOBBY");
+                    if (_actLbl.text != want) _actLbl.text = want;
+                }
 
-                if (_info != null && _port != null && (_port.text ?? "").Trim() != _infoPort) _info.text = InfoText();
-                if (_status != null) _status.text = _hostArmed ? "Loading your save to host..." : (Net.Status ?? "");
+                if (_info != null && _port != null && InfoKey((_port.text ?? "").Trim()) != _infoPort) _info.text = InfoText();
+                if (_tab == 1 && NetSession.UseSteam && !active) RefreshFriends(false);
+                FitInfo();
+                if (_conn != null && _conn.interactable == active) _conn.interactable = !active;
+                if (_status != null) { var st = Loc.T(_tab == 2 ? _svMsg : _hostArmed ? "Loading your save to host..." : (Net.Status ?? "")); if (_status.text != st) _status.text = st; }
+                if (_tab == 2) TickConfirm();
                 if (_players != null)
                 {
                     if (!active) _players.text = "-";
                     else
                     {
                         var names = new List<string>();
-                        foreach (var p in Net.Players.Values) names.Add(p.Id == Net.LocalId ? p.Name + " (you)" : p.Name);
+                        foreach (var p in Net.Players.Values) names.Add(p.Id == Net.LocalId ? p.Name + " " + Loc.T("(you)") : p.Name);
                         _players.text = string.Join(", ", names);
                     }
                 }
@@ -728,7 +1210,19 @@ namespace CanEmAllMP
                         if (_ffSw[i] != null) _ffSw[i].color = c;
                         if (_ffSel[i] != null && _ffSel[i].activeSelf != (i == sel)) _ffSel[i].SetActive(i == sel);
                     }
-                    if (_ffLabel != null) _ffLabel.text = client ? "Friendly fire (host decides)" : "Friendly fire";
+                    if (_ffLabel != null) { var fl = Loc.T(client ? "Friendly fire (host decides)" : "Friendly fire"); if (_ffLabel.text != fl) _ffLabel.text = fl; }
+                }
+                if (_psSw != null)
+                {
+                    bool client = Net.IsClient;
+                    int sel = (client ? CoopSync.SharedPause : Plugin.SharedPause.Value) ? 1 : 0;
+                    var cols = new[] { FfOff, FfOn };
+                    for (int i = 0; i < _psSw.Length; i++)
+                    {
+                        var c = cols[i]; c.a = client && i != sel ? 0.25f : 1f;
+                        if (_psSw[i] != null) _psSw[i].color = c;
+                        if (_psSel[i] != null && _psSel[i].activeSelf != (i == sel)) _psSel[i].SetActive(i == sel);
+                    }
                 }
                 if (_slot != null && _slot.interactable == active) _slot.interactable = !active;
             }

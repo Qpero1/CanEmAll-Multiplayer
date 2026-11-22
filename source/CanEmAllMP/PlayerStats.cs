@@ -13,7 +13,37 @@ namespace CanEmAllMP
     ///  - deaths: a player going down (spectating) counts once per death.
     public static class PlayerStats
     {
-        public class S { public int Kills, Deaths, Ping = -1; }
+        public class S { public int Kills, Deaths, Ping = -1; public long Gambled, Won; }
+
+        /// "$850", "$12.3k", "$1.2M"
+        public static string Money(long v)
+        {
+            if (v < 1000) return "$" + v;
+            if (v < 1_000_000) return "$" + (v / 1000.0).ToString(v < 10_000 ? "0.#" : "0") + "k";
+            if (v < 1_000_000_000) return "$" + (v / 1_000_000.0).ToString(v < 10_000_000 ? "0.#" : "0") + "M";
+            return "$" + (v / 1_000_000_000.0).ToString("0.#") + "B";
+        }
+
+        // ------------------------------------------------ gambling (the spinner's own machine reports each real spin)
+
+        /// The slot machine showed the result of OUR spin (not a replay): count the bet and the winnings.
+        public static void LocalSpinResult(long bet, long won)
+        {
+            if (!Net.Connected || bet < 0) return;
+            if (won < 0) won = 0;
+            if (Net.IsHost) { var s = Of(Net.LocalId); s.Gambled += bet; s.Won += won; return; }
+            Net.Begin(Msg.GambleStat).Put(bet); Net.W.Put(won);
+            Net.Send(DeliveryMethod.ReliableOrdered);
+        }
+
+        /// Host: a joiner's spin finished on their machine.
+        public static void ReceiveGamble(int from, NetDataReader r)
+        {
+            if (!Net.IsHost) return;
+            long bet = r.GetLong(), won = r.GetLong();
+            if (bet < 0 || won < 0 || bet > 1_000_000_000_000L || won > 1_000_000_000_000L) return; // nonsense
+            var s = Of(from); s.Gambled += bet; s.Won += won;
+        }
 
         public static readonly Dictionary<int, S> All = new Dictionary<int, S>();
         /// Host: the joiner whose hit is being applied right now (-1 = none).
@@ -33,14 +63,14 @@ namespace CanEmAllMP
                 s = new S();
                 // host: carry on from the numbers saved with this save file (matched by name)
                 if (Net.IsHost && Net.Players.TryGetValue(id, out var p) && _saved.TryGetValue(p.Name ?? "", out var old))
-                { s.Kills = old.Kills; s.Deaths = old.Deaths; }
+                { s.Kills = old.Kills; s.Deaths = old.Deaths; s.Gambled = old.Gambled; s.Won = old.Won; }
                 All[id] = s;
             }
             return s;
         }
 
         // ------------------------------------------------ saved with the save file (host)
-        // <save path>.mpstats, one line per player name: name \t kills \t deaths. Written when the game saves (end of day),
+        // <save path>.mpstats, one line per player name: name \t kills \t deaths [\t gambled \t won]. Written when the game saves (end of day),
         // so like the game's own progress, a day you quit in the middle of isn't kept.
         private static readonly Dictionary<string, S> _saved = new Dictionary<string, S>();
         private static bool _loaded;
@@ -62,7 +92,9 @@ namespace CanEmAllMP
                 {
                     var f = line.Split('\t');
                     if (f.Length < 3 || !int.TryParse(f[1], out var k) || !int.TryParse(f[2], out var d)) continue;
-                    _saved[f[0]] = new S { Kills = k, Deaths = d };
+                    long g = 0, wn = 0;
+                    if (f.Length >= 5) { long.TryParse(f[3], out g); long.TryParse(f[4], out wn); }
+                    _saved[f[0]] = new S { Kills = k, Deaths = d, Gambled = g, Won = wn };
                 }
                 Plugin.Log.LogInfo($"[stats] loaded {_saved.Count} player(s) from {path}");
             }
@@ -73,7 +105,7 @@ namespace CanEmAllMP
         private static void Remember(int id, string name)
         {
             if (string.IsNullOrEmpty(name) || !All.TryGetValue(id, out var s)) return;
-            _saved[name] = new S { Kills = s.Kills, Deaths = s.Deaths };
+            _saved[name] = new S { Kills = s.Kills, Deaths = s.Deaths, Gambled = s.Gambled, Won = s.Won };
         }
 
         public static void PlayerLeft(int id, string name)
@@ -93,7 +125,8 @@ namespace CanEmAllMP
             try
             {
                 var sb = new System.Text.StringBuilder();
-                foreach (var kv in _saved) sb.Append(kv.Key.Replace('\t', ' ')).Append('\t').Append(kv.Value.Kills).Append('\t').Append(kv.Value.Deaths).Append('\n');
+                foreach (var kv in _saved) sb.Append(kv.Key.Replace('\t', ' ')).Append('\t').Append(kv.Value.Kills).Append('\t').Append(kv.Value.Deaths)
+                      .Append('\t').Append(kv.Value.Gambled).Append('\t').Append(kv.Value.Won).Append('\n');
                 System.IO.File.WriteAllText(path, sb.ToString());
                 Plugin.Log.LogInfo($"[stats] saved {_saved.Count} player(s) to {path}");
             }
@@ -201,7 +234,7 @@ namespace CanEmAllMP
             {
                 var s = Of(id);
                 s.Ping = id == Net.LocalId ? -1 : Net.PingOf(id);
-                w.Put(id); w.Put(s.Kills); w.Put(s.Deaths); w.Put(s.Ping);
+                w.Put(id); w.Put(s.Kills); w.Put(s.Deaths); w.Put(s.Ping); w.Put(s.Gambled); w.Put(s.Won);
             }
             Net.Send(DeliveryMethod.ReliableOrdered);
         }
@@ -216,6 +249,7 @@ namespace CanEmAllMP
                 var s = Of(id);
                 s.Kills = r.GetInt(); s.Deaths = r.GetInt();
                 s.Ping = r.AvailableBytes >= 4 ? r.GetInt() : -1;
+                if (r.AvailableBytes >= 16) { s.Gambled = r.GetLong(); s.Won = r.GetLong(); }
             }
         }
     }

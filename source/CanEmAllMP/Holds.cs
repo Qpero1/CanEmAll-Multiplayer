@@ -6,6 +6,39 @@ using UnityEngine;
 
 namespace CanEmAllMP
 {
+    /// Position/rotation updates rendered a fixed ~100ms in the past (like player avatars), so objects someone
+    /// carries move smoothly and in step with that player instead of jumping on every (irregular) update.
+    public sealed class SnapBuffer
+    {
+        public const float Delay = 0.1f;
+        private readonly List<(float t, Vector3 p, Quaternion r)> _b = new List<(float, Vector3, Quaternion)>();
+
+        public void Add(Vector3 p, Quaternion r)
+        {
+            _b.Add((Time.time, p, r));
+            if (_b.Count > 24) _b.RemoveAt(0);
+        }
+
+        public void Reset(Vector3 p, Quaternion r) { _b.Clear(); _b.Add((Time.time - Delay, p, r)); }
+        public void Clear() => _b.Clear();
+        public bool Empty => _b.Count == 0;
+
+        public bool Sample(out Vector3 p, out Quaternion r)
+        {
+            p = default; r = Quaternion.identity;
+            if (_b.Count == 0) return false;
+            float rt = Time.time - Delay;
+            while (_b.Count > 2 && _b[1].t <= rt) _b.RemoveAt(0);
+            var a = _b[0];
+            if (_b.Count == 1 || rt <= a.t) { p = a.p; r = a.r; return true; }
+            var b = _b[1];
+            if (rt >= b.t) { p = b.p; r = b.r; return true; }
+            float k = (rt - a.t) / Mathf.Max(0.0001f, b.t - a.t);
+            p = Vector3.Lerp(a.p, b.p, k); r = Quaternion.Slerp(a.r, b.r, k);
+            return true;
+        }
+    }
+
     /// <summary>
     /// Who is holding each shared physics object of one kind (dead bodies or cans). The host decides.
     ///
@@ -42,6 +75,7 @@ namespace CanEmAllMP
         public Func<T, Rigidbody> RbOf;
         public Func<T, bool> InMachine;            // being canned / paid for: leave it alone
         public Func<T, bool> KeepDynamic;          // host: after a joiner hands it back, give it normal physics
+        public Func<T, bool> Carried;              // riding in something we carry (e.g. a can in our crate): keep it
         public Action<ushort, T, bool> LocalChanged; // client: we started (true) / stopped (false) simulating it
 
         public HoldTable(string kind, Msg claim, Msg owner, Msg release, Msg stream)
@@ -71,6 +105,7 @@ namespace CanEmAllMP
         {
             public byte Holder = Nobody, Epoch;
             public Vector3 Pos, Vel; public Quaternion Rot = Quaternion.identity; public bool Active = true;
+            public readonly SnapBuffer Buf = new SnapBuffer();
             public float Seen;
             public bool Saved, Kin, Grav;           // our copy's physics before a joiner took it over
             public float FreeSince = -1, RestSince = -1;
@@ -86,6 +121,14 @@ namespace CanEmAllMP
 
         public byte HostHolder(ushort id) => _host.TryGetValue(id, out var h) ? h.Holder : Nobody;
         public byte HostEpoch(ushort id) => _host.TryGetValue(id, out var h) ? h.Epoch : (byte)0;
+
+        /// Host: the newest pose a joiner sent for an object they hold (forwarded as-is so the others don't get it twice delayed).
+        public bool HostRemotePose(ushort id, out Vector3 pos, out Quaternion rot)
+        {
+            pos = default; rot = Quaternion.identity;
+            if (!_host.TryGetValue(id, out var h) || h.Holder == Nobody || h.Holder == 0) return false;
+            pos = h.Pos; rot = h.Rot; return true;
+        }
 
         /// Host: a joiner simulates this one (our copy just follows).
         public bool HostRemote(ushort id) => _host.TryGetValue(id, out var h) && h.Holder != Nobody && h.Holder != 0;
@@ -155,6 +198,7 @@ namespace CanEmAllMP
             }
             var t = obj.transform;
             h.Pos = t.position; h.Rot = t.rotation; h.Vel = Vector3.zero; h.Active = obj.gameObject.activeSelf;
+            h.Buf.Reset(h.Pos, h.Rot);
         }
 
         /// Back to the host: real physics again, where (and as fast as) the joiner last had it.
@@ -200,6 +244,7 @@ namespace CanEmAllMP
                 if (_host.TryGetValue(id, out var h) && h.Holder == (byte)from)
                 {
                     h.Pos = pos; h.Rot = rot; h.Active = active; h.Seen = now;
+                    h.Buf.Add(pos, rot);
                 }
             }
         }
@@ -209,7 +254,6 @@ namespace CanEmAllMP
         {
             if (_host.Count == 0) return;
             float now = Time.unscaledTime;
-            float k = 1f - Mathf.Exp(-Time.unscaledDeltaTime * 18f);
             _tmpA.Clear(); _tmpB.Clear(); _tmpC.Clear();
             foreach (var kv in _host)
             {
@@ -219,7 +263,7 @@ namespace CanEmAllMP
                 if (obj == null) { _tmpC.Add(kv.Key); continue; }
                 if (h.Holder == 0)
                 {
-                    bool busy = VacuumHelper.HeldLocally(obj.Pointer) || InMachine(obj) || !obj.gameObject.activeInHierarchy;
+                    bool busy = VacuumHelper.HeldLocally(obj.Pointer) || InMachine(obj) || !obj.gameObject.activeInHierarchy || (Carried != null && Carried(obj));
                     if (Settled(ref h.FreeSince, ref h.RestSince, RbOf(obj), busy, now)) _tmpA.Add(kv.Key);
                     continue;
                 }
@@ -227,8 +271,7 @@ namespace CanEmAllMP
                 if (now - h.Seen > OwnerTimeout) { _tmpB.Add(kv.Key); continue; }
                 var go = obj.gameObject;
                 if (go.activeSelf != h.Active) go.SetActive(h.Active);
-                var t = obj.transform;
-                t.SetPositionAndRotation(Vector3.Lerp(t.position, h.Pos, k), Quaternion.Slerp(t.rotation, h.Rot, k));
+                if (h.Buf.Sample(out var bp, out var br)) obj.transform.SetPositionAndRotation(bp, br);
             }
             foreach (var id in _tmpA) HostSetHolder(id, Nobody);
             foreach (var id in _tmpB)
@@ -408,7 +451,7 @@ namespace CanEmAllMP
                 var obj = ClientObj(kv.Key);
                 if (obj == null) { _tmpC.Add(kv.Key); continue; }
                 if (c.Pending != 0 && now - c.PendingSince > 8f) { c.Pending = 0; _tmpB.Add(kv.Key); continue; }   // never answered: give up
-                bool busy = c.Pending != 0 || VacuumHelper.HeldLocally(obj.Pointer) || InMachine(obj) || !obj.gameObject.activeInHierarchy;
+                bool busy = c.Pending != 0 || VacuumHelper.HeldLocally(obj.Pointer) || InMachine(obj) || !obj.gameObject.activeInHierarchy || (Carried != null && Carried(obj));
                 if (Settled(ref c.FreeSince, ref c.RestSince, RbOf(obj), busy, now)) _tmpA.Add(kv.Key);
             }
             foreach (var id in _tmpA) { var c = _client[id]; Release(id, c, ClientObj(id)); }

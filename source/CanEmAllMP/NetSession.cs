@@ -25,7 +25,7 @@ namespace CanEmAllMP
     public class NetSession
     {
         public const string ConnectKey = "CanEmAllMP-v1";
-        public const string ModVersion = "0.31.2";
+        public const string ModVersion = "0.45.0";
 
         public NetMode Mode { get; private set; } = NetMode.Offline;
         public bool IsHost => Mode == NetMode.Host;
@@ -97,24 +97,52 @@ namespace CanEmAllMP
         public event Action<int, Msg, NetPacketReader> OnMessage;   // (senderPlayerId, type, reader)
         public event Action<int> OnPlayerJoined;
         public event Action<int, string> OnPlayerLeft; // (id, name)
+        /// True while OnPlayerLeft runs for someone the host kicked (so the message can say so).
+        public bool LeftWasKick { get; private set; }
+        private readonly HashSet<int> _kicked = new HashSet<int>();
         public event Action OnConnectedToHost;
         public event Action<DisconnectReason> OnDisconnected;
 
         private LiteNetManager _net;
         private EventBasedLiteNetListener _listener;
+        private OnlineLayer _layer;
+        private OnlineLink _link; // lobby-code connection (null for direct IP)
+        private SteamLink _steam; // Steam friends connection
+
+        /// Online (lobby code) instead of direct IP + port forwarding.
+        public static bool UseOnline => !UseDirect && !UseSteam;
+        /// IP address + port forwarding.
+        public static bool UseDirect => string.Equals((Plugin.Connection?.Value ?? "Steam").Trim(), "Direct", StringComparison.OrdinalIgnoreCase);
+        /// Steam friends (peer-to-peer through Steam's relays; no lobby server).
+        public static bool UseSteam => string.Equals((Plugin.Connection?.Value ?? "Steam").Trim(), "Steam", StringComparison.OrdinalIgnoreCase);
+        public bool OnSteam => _steam != null;
+        public bool Online => _link != null;
+        public string LobbyCode => _link?.Code;
+        /// Joiner: how we reached the host ("direct", "TURN", "lobby relay").
+        public string OnlinePath => _steam != null && Connected ? "Steam" : _link != null && Connected ? _link.PathName : "";
+        /// Host: how a player reaches us ("direct", "TURN", "relay"; "" for direct-IP sessions).
+        public string PathOf(int playerId) =>
+            _steam != null && IsHost && Players.TryGetValue(playerId, out var sp) && sp.Peer != null && _steam.Owns(sp.Peer) ? "Steam" :
+            _link != null && IsHost && Players.TryGetValue(playerId, out var p) && p.Peer != null ? _link.PathOf(p.Peer) : "";
+
+        /// Host: a lobby code arrived.
+        public event Action<string> OnLobbyCode;
         private LiteNetPeer _server; // client side
         private readonly Dictionary<int, int> _peerToPlayer = new Dictionary<int, int>(); // host: peer.Id -> playerId
         private int _nextPlayerId = 1;
         public readonly NetDataWriter W = new NetDataWriter();
 
-        private void CreateManager()
+        private void CreateManager(bool online = false)
         {
+            _layer = online ? new OnlineLayer() : null;
             _listener = new EventBasedLiteNetListener();
             _listener.ConnectionRequestEvent += req =>
             {
                 if (!IsHost) { req.Reject(); return; }
-                string why = MaxPlayers > 0 && Players.Count >= MaxPlayers ? "Session is full" : !HostAcceptsJoins() ? "Host not in game" : null;
+                int live = LivePlayers();
+                string why = MaxPlayers > 0 && live >= MaxPlayers ? "Session is full" : !HostAcceptsJoins() ? "Host not in game" : null;
                 if (why == null) { req.AcceptIfKey(ConnectKey); return; }
+                Plugin.Log.LogInfo($"Refused a connection from {req.RemoteEndPoint}: {why} ({live}/{(MaxPlayers > 0 ? MaxPlayers.ToString() : "unlimited")} players, {Players.Count} listed)");
                 var rw = new NetDataWriter(); rw.Put(why);
                 req.Reject(rw);
             };
@@ -122,7 +150,7 @@ namespace CanEmAllMP
             _listener.PeerDisconnectedEvent += OnPeerDisconnected;
             _listener.NetworkReceiveEvent += OnReceive;
             _listener.NetworkErrorEvent += (ep, err) => Plugin.Log.LogWarning($"Socket error {err} from {ep}");
-            _net = new LiteNetManager(_listener)
+            _net = new LiteNetManager(_listener, _layer)
             {
                 AutoRecycle = true,
                 DisconnectTimeout = 10000,
@@ -132,9 +160,104 @@ namespace CanEmAllMP
             };
         }
 
+        /// Host with the configured connection type (lobby code or port forwarding).
+        public bool StartHost()
+        {
+            MaxPlayers = Plugin.MaxPlayers.Value <= 0 ? 0 : Math.Max(2, Math.Min(8, Plugin.MaxPlayers.Value)); // in force from the first join
+            return UseSteam ? HostSteam() : UseOnline ? HostOnline() : Host(Plugin.Port.Value);
+        }
+
+        /// Join with the configured connection type.
+        public bool StartJoin() => UseSteam ? JoinSteam(Plugin.LastSteamHost.Value) : UseOnline ? JoinOnline(Plugin.LastCode.Value) : Join((Plugin.LastAddress.Value ?? "").Trim(), Plugin.Port.Value);
+
+        public bool HostSteam()
+        {
+            Shutdown();
+            if (!SteamApi.Available) { Status = SteamApi.Error ?? "Steam isn't running"; return false; }
+            SaveBackups.NewSession();
+            CreateManager();
+            if (!_net.Start())
+            {
+                Status = "Could not open a UDP socket";
+                _net = null;
+                return false;
+            }
+            Mode = NetMode.Host;
+            LocalId = 0;
+            Players.Clear();
+            Players[0] = new RemotePlayerInfo { Id = 0, Name = LocalName, Color = Palette.Clamp(LocalColor < 0 ? 0 : LocalColor) };
+            _steam = new SteamLink(_net, true, 0, ModVersion);
+            if (!_steam.Start()) { var why = _steam.FailReason; Shutdown(); Status = why; return false; }
+            Status = _steam.Status;
+            return true;
+        }
+
+        public bool JoinSteam(string rawId)
+        {
+            if (!ulong.TryParse((rawId ?? "").Trim(), out var hostId) || hostId == 0) { Status = "Pick a friend to join first"; return false; }
+            Shutdown();
+            if (!SteamApi.Available) { Status = SteamApi.Error ?? "Steam isn't running"; return false; }
+            CreateManager();
+            _net.ReconnectDelay = 500;       // a Steam route can take a few seconds to come up
+            _net.MaxConnectAttempts = 30;
+            _net.Start();
+            Mode = NetMode.Client;
+            LocalId = -1;
+            _steam = new SteamLink(_net, false, hostId, ModVersion);
+            _steam.Connect = ep => _server = _net.Connect(ep, ConnectKey);
+            if (!_steam.Start()) { var why = _steam.FailReason; Shutdown(); Status = why; return false; }
+            Status = "Joining " + (SteamApi.NameOf(hostId) ?? "your friend") + " through Steam...";
+            return true;
+        }
+
+        /// What to tell the player right after hosting started.
+        public string HostingText => OnSteam ? "Hosting through Steam - friends can join from their JOIN tab" : Online ? "Getting a lobby code..." : $"Hosting on UDP {Plugin.Port.Value}. Friends join with your public IP.";
+
+        public bool HostOnline()
+        {
+            Shutdown();
+            SaveBackups.NewSession();
+            CreateManager(true);
+            if (!_net.Start())
+            {
+                Status = "Could not open a UDP socket";
+                _net = null;
+                return false;
+            }
+            Mode = NetMode.Host;
+            LocalId = 0;
+            Players.Clear();
+            Players[0] = new RemotePlayerInfo { Id = 0, Name = LocalName, Color = Palette.Clamp(LocalColor < 0 ? 0 : LocalColor) };
+            _link = new OnlineLink(_net, _layer, Plugin.LobbyServer.Value, true, null, ModVersion, LocalName, MaxPlayers <= 0 ? 8 : MaxPlayers);
+            _link.OnCode += code => { Status = "Lobby code: " + code; OnLobbyCode?.Invoke(code); };
+            _link.Start();
+            Status = "Getting a lobby code...";
+            Plugin.Log.LogInfo($"Hosting online (UDP {_net.LocalPort})");
+            return true;
+        }
+
+        public bool JoinOnline(string rawCode)
+        {
+            var code = OnlineLink.NormalizeCode(rawCode);
+            if (code == null) { Status = "Type the 6-character lobby code first"; return false; }
+            Shutdown();
+            CreateManager(true);
+            _net.ReconnectDelay = 300;    // each path gets ~3.6 s before the next one is tried
+            _net.MaxConnectAttempts = 12;
+            _net.Start();
+            Mode = NetMode.Client;
+            LocalId = -1;
+            _link = new OnlineLink(_net, _layer, Plugin.LobbyServer.Value, false, code, ModVersion, LocalName, 0);
+            _link.Connect = ep => _server = _net.Connect(ep, ConnectKey);
+            _link.Start();
+            Status = "Joining lobby " + code + "...";
+            return true;
+        }
+
         public bool Host(int port)
         {
             Shutdown();
+            SaveBackups.NewSession();
             CreateManager();
             if (!_net.Start(port))
             {
@@ -179,8 +302,27 @@ namespace CanEmAllMP
             return true;
         }
 
+        /// Players really here: the host, plus joiners we've heard from in the last few seconds. Someone who crashed
+        /// stays listed until LiteNetLib's timeout (10 s); they must not keep a friend from (re)joining meanwhile.
+        public int LivePlayers()
+        {
+            int n = 0;
+            foreach (var p in Players.Values)
+            {
+                if (p.Id == LocalId) { n++; continue; }
+                var peer = p.Peer;
+                if (peer != null && (peer.ConnectionState & ConnectionState.Connected) != 0 && peer.TimeSinceLastPacket < 4000f) n++;
+            }
+            return n;
+        }
+
         public void Shutdown()
         {
+            try { _link?.Dispose(); } catch { }
+            _link = null;
+            try { _steam?.Dispose(); } catch { }
+            _steam = null;
+            _layer = null;
             if (_net != null)
             {
                 try { _net.Stop(true); } catch { }
@@ -191,6 +333,7 @@ namespace CanEmAllMP
             LocalId = -1;
             Players.Clear();
             _peerToPlayer.Clear();
+            _kicked.Clear();
             _nextPlayerId = 1;
             Status = "Offline";
         }
@@ -198,6 +341,35 @@ namespace CanEmAllMP
         public void Poll()
         {
             _net?.PollEvents();
+            if (_steam != null)
+            {
+                _steam.Tick();
+                if (_steam.FailReason != null && IsClient && !Connected)
+                {
+                    string why = _steam.FailReason;
+                    Plugin.Log.LogWarning("Steam: " + why);
+                    Shutdown();
+                    Status = why;
+                    LastRejectReason = why; OnDisconnected?.Invoke(DisconnectReason.ConnectionFailed);
+                    return;
+                }
+                if (IsClient && !Connected && _steam != null) Status = _steam.Status;
+            }
+            if (_link == null) return;
+            _link.Tick();
+            if (_link == null) return;
+            if (_link.FailReason != null && (IsHost ? _link.Code == null : !Connected))
+            {
+                // couldn't get a lobby code / couldn't reach the host by any path
+                string why = _link.FailReason;
+                bool client = IsClient;
+                Plugin.Log.LogWarning("Online: " + why);
+                Shutdown();
+                Status = why;
+                if (client) { LastRejectReason = why; OnDisconnected?.Invoke(DisconnectReason.ConnectionFailed); }
+                return;
+            }
+            if (IsClient && !Connected) Status = _link.Status;
         }
 
         // ---------------- sending ----------------
@@ -235,6 +407,8 @@ namespace CanEmAllMP
         {
             if (IsClient)
             {
+                if (_link != null) { if (peer != _server) return; _link.OnConnected(); }
+                _steam?.OnConnected();
                 Status = "Connected, handshaking...";
                 Begin(Msg.Hello).Put(LocalName);
                 W.Put(ModVersion);
@@ -248,10 +422,15 @@ namespace CanEmAllMP
         {
             if (IsClient)
             {
+                if (_link != null)
+                {
+                    if (peer != _server) return; // an older attempt
+                    if (info.Reason == DisconnectReason.ConnectionFailed && _link.OnAttemptFailed(peer)) return; // trying the next path
+                }
                 var reason = info.Reason.ToString();
                 LastRejectReason = null;
                 try { if (info.AdditionalData != null && info.AdditionalData.AvailableBytes > 0) LastRejectReason = info.AdditionalData.GetString(64); } catch { }
-                Plugin.Log.LogInfo("Disconnected from host: " + reason);
+                Plugin.Log.LogInfo("Disconnected from host: " + reason + (LastRejectReason != null ? " (" + LastRejectReason + ")" : "") + (_link != null ? " via " + _link.PathName : ""));
                 Shutdown();
                 Status = "Disconnected: " + reason;
                 OnDisconnected?.Invoke(info.Reason);
@@ -262,9 +441,12 @@ namespace CanEmAllMP
                 _peerToPlayer.Remove(peer.Id);
                 var leftName = NameOf(pid);
                 Players.Remove(pid);
+                bool kicked = _kicked.Remove(pid);
                 Begin(Msg.PlayerLeft).Put(pid);
+                W.Put(kicked);
                 Send();
-                OnPlayerLeft?.Invoke(pid, leftName);
+                LeftWasKick = kicked;
+                try { OnPlayerLeft?.Invoke(pid, leftName); } finally { LeftWasKick = false; }
                 Plugin.Log.LogInfo($"Player {pid} left ({info.Reason})");
             }
         }
@@ -360,7 +542,7 @@ namespace CanEmAllMP
                     }
                     string myName = r.AvailableBytes > 0 ? r.GetString(32) : LocalName;
                     Players[LocalId] = new RemotePlayerInfo { Id = LocalId, Name = myName, Color = myColor };
-                    Status = $"Connected as player {LocalId}";
+                    Status = $"Connected as player {LocalId}" + (_link != null ? $" ({_link.PathName})" : _steam != null ? " (Steam)" : "");
                     Plugin.Log.LogInfo(Status);
                     OnConnectedToHost?.Invoke();
                     foreach (var id in Players.Keys) if (id != LocalId) OnPlayerJoined?.Invoke(id);
@@ -385,9 +567,11 @@ namespace CanEmAllMP
                 case Msg.PlayerLeft:
                 {
                     var id = r.GetInt();
+                    bool kicked = r.AvailableBytes >= 1 && r.GetBool();
                     var leftName = NameOf(id);
                     Players.Remove(id);
-                    OnPlayerLeft?.Invoke(id, leftName);
+                    LeftWasKick = kicked;
+                    try { OnPlayerLeft?.Invoke(id, leftName); } finally { LeftWasKick = false; }
                     return;
                 }
             }
@@ -402,6 +586,7 @@ namespace CanEmAllMP
             var w = new NetDataWriter();
             w.Put("You were kicked by the host");
             Plugin.Log.LogInfo($"Kicking {p.Name}");
+            _kicked.Add(playerId);
             p.Peer.Disconnect(w);
         }
 

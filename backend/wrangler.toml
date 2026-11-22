@@ -1,0 +1,36 @@
+name = "canemall-lobby"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+# Served at https://lobby.pookies.org (Cloudflare creates the DNS record + cert on deploy)
+routes = [{ pattern = "lobby.pookies.org", custom_domain = true }]
+
+[[durable_objects.bindings]]
+name = "LOBBY"
+class_name = "Lobby"
+
+# Free plan only supports SQLite-backed Durable Objects.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Lobby"]
+
+# TURN credentials are secrets, never put them here:
+#   npx wrangler secret put TURN_KEY_ID
+#   npx wrangler secret put TURN_KEY_API_TOKEN
+# Without them the Worker still runs and hands out STUN only (no TURN fallback).
+
+# Workers Logs (free): see errors with their messages under Workers > canemall-lobby > Logs
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+# Rate limit (free): max 15 lobby creates / joins / lookups per IP per minute
+[[ratelimits]]
+name = "LIMITER"
+namespace_id = "1001"
+  [ratelimits.simple]
+  limit = 15
+  period = 60

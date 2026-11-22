@@ -73,7 +73,7 @@ namespace CanEmAllMP
             _screen = scr;
             var st = scr.transform;
 
-            var title = Label(Child(st, "Title")); if (title != null) title.text = "LOBBY";
+            var title = Label(Child(st, "Title")); if (title != null) { Loc.Set(title, "LOBBY"); Loc.Fit(title, 0.5f); }
             Kill(Child(st, "Audio")); Kill(Child(st, "Graphics"));
 
             var tabs = Child(st, "Buttons");
@@ -82,14 +82,14 @@ namespace CanEmAllMP
             if (_startBtn != null)
             {
                 var t = Label(_startBtn.transform);
-                if (t != null) { t.text = "START GAME"; t.enableWordWrapping = false; var r = RT(t.transform); if (r != null) r.sizeDelta = new Vector2(150f, r.sizeDelta.y); }
+                if (t != null) { Loc.Set(t, "START GAME"); t.enableWordWrapping = false; var r = RT(t.transform); if (r != null) r.sizeDelta = new Vector2(150f, r.sizeDelta.y); Loc.Fit(t); }
                 var play = SpriteOf(Child(Find(m.menuPanel.transform, "NewGame"), "Icon"));
                 var ic = Child(_startBtn.transform, "Icon"); if (ic != null && play != null) ic.GetComponent<Image>().sprite = play;
                 OnClick(_startBtn, OnStart);
             }
             var back = Child(st, "Back");
             _leaveLbl = Label(back);
-            if (_leaveLbl != null) _leaveLbl.text = "LEAVE";
+            if (_leaveLbl != null) { Loc.Set(_leaveLbl, "LEAVE"); Loc.Fit(_leaveLbl); }
             OnClick(back.gameObject, OnLeave);
 
             var box = Child(st, "General");
@@ -103,12 +103,15 @@ namespace CanEmAllMP
             _save = TextRow(box, tRow, "Save");
             Line(box, tLine);
             _addr = TextRow(box, tRow, "Address");
+            _addrLbl = Label(_addr.transform.parent);
+            CopyButton(_addr.transform.parent, back);
             Line(box, tLine);
             _status = TextRow(box, tRow, "Status");
             Line(box, tLine);
             var head = TextRow(box, tRow, "Players");
             _header = Label(Child(box, "MP_Players"));
-            head.text = "PING"; head.fontSize = 12;
+            Loc.Unbind(_header);
+            Loc.Set(head, "PING"); head.fontSize = 12; head.fontSizeMax = 12;
             Line(box, tLine);
 
             _rows.Clear();
@@ -123,10 +126,11 @@ namespace CanEmAllMP
                 r.Dot = dot.GetComponent<Image>();
                 if (ddImg != null) { r.Dot.sprite = ddImg.sprite; r.Dot.type = Image.Type.Sliced; r.Dot.pixelsPerUnitMultiplier = ddImg.pixelsPerUnitMultiplier * 2f; }
                 r.Name = Label(row);
+                Loc.Unbind(r.Name);
                 var nr = RT(r.Name.transform);
                 nr.anchoredPosition = new Vector2(nr.anchoredPosition.x + 22f, nr.anchoredPosition.y);
                 nr.sizeDelta = new Vector2(400f, nr.sizeDelta.y);
-                r.Name.fontSize = 15; r.Name.enableWordWrapping = false; r.Name.overflowMode = TextOverflowModes.Ellipsis;
+                r.Name.fontSize = 15; r.Name.fontSizeMax = 15; r.Name.enableWordWrapping = false; r.Name.overflowMode = TextOverflowModes.Ellipsis;
                 r.Ping = Clone(r.Name.gameObject, row).GetComponent<TMP_Text>();
                 r.Ping.gameObject.name = "Ping";
                 Place(RT(r.Ping.transform), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(-100f, 0f), new Vector2(120f, 24f));
@@ -138,7 +142,7 @@ namespace CanEmAllMP
                 Kill(Child(k.transform, "Icon"));
                 const float ks = 0.5f;
                 var kt = Label(k.transform);
-                if (kt != null) { kt.text = "KICK"; Stretch(RT(kt.transform)); kt.alignment = TextAlignmentOptions.Center; kt.fontSize = kt.fontSize * 0.65f; }
+                if (kt != null) { Loc.Set(kt, "KICK"); Stretch(RT(kt.transform)); kt.alignment = TextAlignmentOptions.Center; kt.fontSize = kt.fontSize * 0.65f; kt.enableWordWrapping = false; Loc.Fit(kt, 0.5f); }
                 var ki = k.GetComponent<Image>(); if (ki != null) ki.pixelsPerUnitMultiplier = ki.pixelsPerUnitMultiplier / ks;
                 var rc = RT(Child(k.transform, "Raycast")); if (rc != null) rc.sizeDelta = rc.sizeDelta * ks;
                 Place(RT(k), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), Vector2.zero, new Vector2(170f * ks, 64f * ks));
@@ -150,6 +154,39 @@ namespace CanEmAllMP
             foreach (var o in old) Kill(o);
             Strip(scr);
             Plugin.Log.LogInfo("[UI] lobby built");
+        }
+
+        private static TMP_Text _addrLbl;
+        private static GameObject _copy;
+
+        /// Small COPY button (cloned from BACK) for the lobby code.
+        private static void CopyButton(Transform row, Transform back)
+        {
+            if (back == null || row == null) return;
+            var b = Clone(back.gameObject, row);
+            b.name = "Copy";
+            Kill(Child(b.transform, "Icon"));
+            const float k = 0.6f;
+            var t = Label(b.transform);
+            if (t != null) { Loc.Set(t, "COPY"); Stretch(RT(t.transform)); t.alignment = TextAlignmentOptions.Center; t.fontSize = t.fontSize * k; t.enableWordWrapping = false; Loc.Fit(t, 0.5f); }
+            var img = b.GetComponent<Image>();
+            if (img != null) img.pixelsPerUnitMultiplier = img.pixelsPerUnitMultiplier / k;
+            var rc = RT(Child(b.transform, "Raycast"));
+            if (rc != null) rc.sizeDelta = rc.sizeDelta * k;
+            Place(RT(b), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), Vector2.zero, new Vector2(150f * k, 64f * k));
+            OnClick(b, () =>
+            {
+                var code = Net.LobbyCode;
+                if (code == null) return;
+                try { GUIUtility.systemCopyBuffer = code; } catch { }
+                MpManager.Instance?.Toast("Lobby code copied");
+            });
+            // make room for it: shift the value text left
+            var v = Child(row, "Value");
+            var vr = RT(v);
+            if (vr != null) vr.anchoredPosition = new Vector2(-100f, vr.anchoredPosition.y);
+            b.SetActive(false);
+            _copy = b;
         }
 
         private static void OnStart()
@@ -171,7 +208,7 @@ namespace CanEmAllMP
             if (Time.unscaledTime > r.ConfirmUntil)
             {
                 r.ConfirmUntil = Time.unscaledTime + 3f; // click again to confirm
-                if (r.KickLabel != null) r.KickLabel.text = "SURE?";
+                if (r.KickLabel != null) Loc.Set(r.KickLabel, "SURE?");
                 return;
             }
             string name = Net.NameOf(r.Id);
@@ -191,10 +228,26 @@ namespace CanEmAllMP
             {
                 bool host = Net.IsHost;
                 if (_startBtn != null && _startBtn.activeSelf != host) _startBtn.SetActive(host);
-                if (_leaveLbl != null) _leaveLbl.text = host ? "CLOSE" : "LEAVE";
+                if (_leaveLbl != null) { var lv = Loc.T(host ? "CLOSE" : "LEAVE"); if (_leaveLbl.text != lv) _leaveLbl.text = lv; }
 
-                if (_save != null) _save.text = host ? SaveSlots.Describe(SaveSlots.Current) : "Host's save";
-                if (_addr != null) _addr.text = host ? $"UDP port {Plugin.Port.Value} - friends join with your public IP" : $"{Plugin.LastAddress.Value}:{Plugin.Port.Value}";
+                if (_save != null) _save.text = Loc.T(host ? SaveSlots.Describe(SaveSlots.Current) : "Host's save");
+                if (_addr != null)
+                {
+                    if (Net.OnSteam)
+                    {
+                        _addr.text = Loc.T(host ? "Steam - friends join from their JOIN tab" : "Steam");
+                    }
+                    else if (Net.Online)
+                    {
+                        string code = host ? Net.LobbyCode : OnlineLink.NormalizeCode(Plugin.LastCode.Value);
+                        _addr.text = host ? (code != null ? code + "   " + Loc.T("- send this code to your friends") : Loc.T("Getting a lobby code..."))
+                                          : code + (Net.Connected && Net.OnlinePath != "" ? "   (" + Net.OnlinePath + ")" : "");
+                    }
+                    else _addr.text = host ? Loc.F("UDP port {0} - friends join with your public IP", Plugin.Port.Value) : $"{Plugin.LastAddress.Value}:{Plugin.Port.Value}";
+                    if (_addrLbl != null) { var al = Loc.T(Net.OnSteam ? "Connection" : Net.Online ? "Lobby code" : "Address"); if (_addrLbl.text != al) _addrLbl.text = al; }
+                    bool canCopy = host && Net.LobbyCode != null;
+                    if (_copy != null && _copy.activeSelf != canCopy) _copy.SetActive(canCopy);
+                }
                 if (_status != null)
                 {
                     string st;
@@ -202,15 +255,15 @@ namespace CanEmAllMP
                     else if (!Net.Connected) st = Net.Status ?? "Connecting...";
                     else if (HostSave.WaitingForSave) st = "Waiting for the host to start";
                     else st = Net.Status ?? "";
-                    _status.text = st;
+                    _status.text = Loc.T(st);
                 }
 
                 var ids = new List<int>(Net.Players.Keys);
                 ids.Sort();
                 int max = host ? Net.MaxPlayers : 0;
                 string cap = host && max > 0 ? "/" + max : "";
-                string more = ids.Count > MaxRows ? $"  (+{ids.Count - MaxRows} more)" : "";
-                if (_header != null) _header.text = $"Players ({ids.Count}{cap}){more}";
+                string more = ids.Count > MaxRows ? "  " + Loc.F("(+{0} more)", ids.Count - MaxRows) : "";
+                if (_header != null) _header.text = Loc.F("Players ({0})", ids.Count + cap) + more;
                 for (int i = 0; i < _rows.Count; i++)
                 {
                     var r = _rows[i];
@@ -219,12 +272,12 @@ namespace CanEmAllMP
                     if (!show) continue;
                     int id = ids[i];
                     r.Dot.color = Palette.ForPlayer(id);
-                    r.Name.text = Net.NameOf(id) + (id == 0 ? " (host)" : "") + (id == Net.LocalId ? " (you)" : "");
+                    r.Name.text = Net.NameOf(id) + (id == 0 ? " " + Loc.T("(host)") : "") + (id == Net.LocalId ? " " + Loc.T("(you)") : "");
                     r.Ping.text = PauseUi.PingText(id);
                     if (r.Id != id) { r.Id = id; r.ConfirmUntil = 0f; }
                     bool kickable = host && id != Net.LocalId;
                     if (r.Kick.activeSelf != kickable) r.Kick.SetActive(kickable);
-                    if (kickable && r.KickLabel != null && Time.unscaledTime > r.ConfirmUntil && r.KickLabel.text != "KICK") r.KickLabel.text = "KICK";
+                    if (kickable && r.KickLabel != null && Time.unscaledTime > r.ConfirmUntil && r.KickLabel.text != Loc.T("KICK")) Loc.Set(r.KickLabel, "KICK");
                 }
             }
             catch (Exception e) { Plugin.Log.LogWarning("[UI] lobby refresh: " + e.Message); }

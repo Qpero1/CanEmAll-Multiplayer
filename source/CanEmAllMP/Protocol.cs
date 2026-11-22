@@ -67,6 +67,15 @@ namespace CanEmAllMP
         ExitGo = 61,         // host -> clients: everyone's in, start the exit elevator
         ExitStatus = 62,     // host -> clients: string waiting text
         CorpsePose = 63,
+        PauseMode = 70,
+        GambleStat = 71,
+        EnemyDeform = 73,    // host -> clients: ushort id, byte n, n x Vector4 (the creature's damage / broken-part shader slots)
+        MailOpen = 72,       // anyone: int mailId, int who (open that letter in the mail tab; host relays)     // client -> host: long bet, long won (one finished spin of mine)      // host -> clients: bool (true = shared pause, false = everyone pauses only their own menu)
+        CrateSnapshot = 65,  // host -> clients: byte n, n x (ushort id, pos, rot, bool active, byte holder, byte epoch)
+        CrateOwner = 66,     // host -> clients: same layout as CanOwner
+        CrateClaim = 67,     // client -> host: same layout as CanClaim
+        CrateOwned = 68,     // client -> host: same layout as CanOwned (holder streams it)
+        CrateRelease = 69,   // client -> host: same layout as CanRelease
         PlayerStats = 64,    // host -> clients: byte n, n x (int id, int kills, int deaths, int ping to host)     // host -> clients: int owner, byte n, n x (pos xyz, rot xyzw): a dead player's ragdoll
         PermBought = 58,     // host -> clients: int skillId, int who (apply that permanent upgrade)
         TruckState = 27,     // host -> clients: truck body/door transform + facility door animator state       // host -> new client: gzipped SaveData json chunk (int total, int offset, bytes)

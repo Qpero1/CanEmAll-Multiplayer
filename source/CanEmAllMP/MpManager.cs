@@ -18,7 +18,7 @@ namespace CanEmAllMP
 
         private readonly Dictionary<int, RemoteAvatar> _avatars = new Dictionary<int, RemoteAvatar>();
         private float _sendTimer, _timerSyncTimer, _enemyTimer;
-        private string _addrField, _portField, _nameField;
+        private string _addrField, _portField, _nameField, _codeField;
         private CursorLockMode _prevLock;
         private bool _prevVisible;
         private readonly List<string> _feed = new List<string>();
@@ -36,22 +36,23 @@ namespace CanEmAllMP
             DontDestroyOnLoad(gameObject);
             gameObject.hideFlags = HideFlags.HideAndDontSave;
             _addrField = Plugin.LastAddress.Value;
+            _codeField = Plugin.LastCode.Value;
             _portField = Plugin.Port.Value.ToString();
             _nameField = Plugin.PlayerName.Value;
             Net.LocalColor = Plugin.PlayerColor.Value;
             Net.OnPlayerColor += id => { if (_avatars.TryGetValue(id, out var av)) av.RefreshColor(); };
 
             Net.OnPlayerJoined += id => { if (Net.IsHost) Extras.ResendLighting(); if (id != Net.LocalId) { GetAvatar(id); Feed($"{Net.NameOf(id)} joined"); Toast($"{Net.NameOf(id)} joined"); } OnSomeoneJoined(id); };
-            Net.OnPlayerLeft += (id, name) => { PlayerStats.PlayerLeft(id, name); RemoveAvatar(id); if (Net.IsHost) { EnemySync.HostPlayerLeft(id); CanSync.HostPlayerLeft(id); ContinueSync.PlayerLeft(id); } Extras.PlayerLeft(id); GambleSync.PlayerLeft(id); Feed($"{name} left"); Toast($"{name} left"); };
+            Net.OnPlayerLeft += (id, name) => { PlayerStats.PlayerLeft(id, name); RemoveAvatar(id); if (Net.IsHost) { EnemySync.HostPlayerLeft(id); CanSync.HostPlayerLeft(id); CrateSync.HostPlayerLeft(id); ContinueSync.PlayerLeft(id); } Extras.PlayerLeft(id); GambleSync.PlayerLeft(id); var how = Net.LeftWasKick ? "was kicked" : "left"; Feed($"{name} {how}"); Toast($"{name} {how}"); };
             Net.OnConnectedToHost += () => { Feed("Connected to host"); _lastKnownMoney = double.NaN; HostSave.OnConnected(); };
             Net.OnDisconnected += reason =>
             {
-                ClearAvatars(); EnemySync.Reset(); CanSync.Reset(); CoopSync.Reset(); ContinueSync.Reset(); Extras.Reset(); GambleSync.Reset(); FactorySync.Reset();
+                ClearAvatars(); EnemySync.Reset(); CanSync.Reset(); CrateSync.Reset(); CoopSync.Reset(); ContinueSync.Reset(); Extras.Reset(); GambleSync.Reset(); FactorySync.Reset();
                 Palette.RefreshCursor();
                 bool hostLeft = reason == DisconnectReason.RemoteConnectionClose;
                 var msg = !string.IsNullOrEmpty(Net.LastRejectReason) ? Net.LastRejectReason
                         : hostLeft ? "Host left"
-                        : reason == DisconnectReason.ConnectionFailed ? "Couldn't reach the host (check the IP / port forwarding)"
+                        : reason == DisconnectReason.ConnectionFailed ? (!NetSession.UseDirect ? "Couldn't reach the host" : "Couldn't reach the host (check the IP / port forwarding)")
                         : "Lost connection to host (" + reason + ")";
                 Feed(msg); Toast(msg);
                 if (HostSave.UsingHostSave && GameManager.Instance != null && !HostSave.InMainMenu)
@@ -64,8 +65,49 @@ namespace CanEmAllMP
                 }
                 if (HostSave.UsingHostSave) Feed("You were on the host's save, so nothing was saved.");
             };
+            Net.OnLobbyCode += code =>
+            {
+                try { GUIUtility.systemCopyBuffer = code; } catch { }
+                Note($"Lobby code: {code} (copied to clipboard)");
+                Toast("Lobby code " + code);
+            };
             Net.OnMessage += HandleMessage;
             Net.HostAcceptsJoins = () => GameApi.InGame || LobbyUi.HostInLobby;
+        }
+
+        // Other players' avatars (body capsule for friendly fire, held weapon models, ragdolls) must never push our
+        // own player: when everyone spawns on the same spot in the elevator, that shoved people through the walls.
+        // Bullets still hit them (raycasts don't care about IgnoreCollision).
+        private IntPtr _ignorePlayer;
+        private float _ignoreFastUntil, _nextIgnore;
+        private readonly List<Collider> _mine = new List<Collider>();
+
+        private void IgnoreAvatarCollisions()
+        {
+            if (_avatars.Count == 0) return;
+            var pl = Player.Instance;
+            if (pl == null) return;
+            float now = Time.unscaledTime;
+            if (pl.Pointer != _ignorePlayer) { _ignorePlayer = pl.Pointer; _ignoreFastUntil = now + 3f; } // new day / new scene
+            if (now < _nextIgnore && now > _ignoreFastUntil) return;
+            _nextIgnore = now + 0.25f;
+            _mine.Clear();
+            foreach (var c in pl.GetComponentsInChildren(Il2CppInterop.Runtime.Il2CppType.Of<Collider>(), true))
+            {
+                var col = c?.TryCast<Collider>();
+                if (col != null) _mine.Add(col);
+            }
+            if (_mine.Count == 0) return;
+            foreach (var a in _avatars.Values)
+            {
+                if (a.Root == null) continue;
+                foreach (var c in a.Root.GetComponentsInChildren(Il2CppInterop.Runtime.Il2CppType.Of<Collider>(), true))
+                {
+                    var col = c?.TryCast<Collider>();
+                    if (col == null) continue;
+                    foreach (var m in _mine) Physics.IgnoreCollision(m, col, true);
+                }
+            }
         }
 
         private bool _wasInGame;
@@ -89,10 +131,13 @@ namespace CanEmAllMP
         {
             bool wasHost = Net.IsHost;
             Net.Shutdown();          // sends disconnects: clients see "Host left", host sees "<name> left"
-            ClearAvatars(); EnemySync.Reset(); CanSync.Reset(); CoopSync.Reset(); ContinueSync.Reset(); Extras.Reset(); GambleSync.Reset(); FactorySync.Reset();
+            ClearAvatars(); EnemySync.Reset(); CanSync.Reset(); CrateSync.Reset(); CoopSync.Reset(); ContinueSync.Reset(); Extras.Reset(); GambleSync.Reset(); FactorySync.Reset();
             HostSave.OnMainMenu();   // a joiner gets their own save back
             Feed(wasHost ? "Stopped hosting (back on the main menu)" : "Left the session (back on the main menu)");
         }
+
+        /// Log only (combat details, setup chatter): kept out of the on-screen feed so it stays quiet.
+        public void Note(string s) => Plugin.Log.LogInfo("[MP] " + s);
 
         public void Feed(string s)
         {
@@ -108,6 +153,8 @@ namespace CanEmAllMP
             try { Net.Poll(); } catch (Exception e) { Plugin.Log.LogError(e); }
 
             if (MenuKeyPressed()) ToggleMenu();
+            try { Loc.Tick(); } catch (Exception e) { if (_uiErr++ < 3) Plugin.Log.LogError(e); }
+            try { SteamJoin.Tick(); } catch (Exception e) { if (_uiErr++ < 3) Plugin.Log.LogError(e); }
             try { Palette.TickSystemCursor(Net.Active ? Net.MyColor : (Plugin.PlayerColor.Value < 0 ? 0 : Plugin.PlayerColor.Value)); } catch { }
             CanDiagnostics.Tick();
             if (!_tweensSized) SizeTweens();
@@ -120,6 +167,7 @@ namespace CanEmAllMP
             try { PauseUi.Tick(); } catch (Exception e) { if (_uiErr++ < 3) Plugin.Log.LogError(e); }
             try { MenuUi.Tick(); } catch (Exception e) { if (_uiErr++ < 3) Plugin.Log.LogError(e); }
             Gestures.Poll();
+            try { HitMarker.Tick(); } catch { }
 
             // Anyone who goes from playing back to the main menu leaves the session.
             if (GameApi.InGame) _wasInGame = true;
@@ -139,7 +187,10 @@ namespace CanEmAllMP
 
             // host: the config setting is the truth (it used to apply only after toggling it in F8)
             if (Net.IsHost && Extras.FriendlyFire != Plugin.FriendlyFire.Value) Extras.SetFriendlyFire(Plugin.FriendlyFire.Value, true);
+            CoopSync.HostTickPauseMode();
+            CoopSync.KeepRunningIfLocal();
             foreach (var a in _avatars.Values) a.Tick();
+            try { IgnoreAvatarCollisions(); } catch (Exception e) { if (_tickErr++ < 3) Plugin.Log.LogWarning("[MP] avatar collisions: " + e.Message); }
             try { VacuumPull.Update(_avatars.Values); } catch (Exception e) { Plugin.Log.LogError(e); }
             try { Spectate.Tick(); } catch (Exception e) { Plugin.Log.LogError(e); }
 
@@ -181,9 +232,11 @@ namespace CanEmAllMP
                         Guard("enemy broadcast", () => EnemySync.HostBroadcast(Net));
                         Guard("truck broadcast", () => EnemySync.HostBroadcastTruck(Net));
                         Guard("can broadcast", () => CanSync.HostBroadcast(Net));
+                        Guard("crate broadcast", () => CrateSync.HostBroadcast(Net));
                     }
                     Guard("enemy tick", EnemySync.HostTick);
                     Guard("can tick", CanSync.HostTick);
+                    Guard("crate tick", CrateSync.HostTick);
                 }
             }
             else
@@ -193,6 +246,7 @@ namespace CanEmAllMP
                 {
                     Guard("enemy tick", EnemySync.ClientTick);
                     Guard("can tick", CanSync.ClientTick);
+                    Guard("crate tick", CrateSync.ClientTick);
                 }
             }
             VacuumHelper.Tick();
@@ -262,7 +316,7 @@ namespace CanEmAllMP
             if (!Net.IsHost) { _lobbyWaiting.Clear(); _lobbySendAt = -1f; return; }
             Net.MaxPlayers = Plugin.MaxPlayers.Value <= 0 ? 0 : Mathf.Clamp(Plugin.MaxPlayers.Value, 2, 8);
             if (_lobbyWaiting.Count == 0) return;
-            if (!GameApi.InGame || !HostSave.GameStarted) { _lobbySendAt = -1f; return; }
+            if (!GameApi.InGame || !HostSave.GameStarted || HostBetweenDays()) { _lobbySendAt = -1f; return; }
             if (_lobbySendAt < 0f) { _lobbySendAt = Time.unscaledTime + 1f; return; } // let the money settle
             if (Time.unscaledTime < _lobbySendAt) return;
             var ids = new List<int>(_lobbyWaiting);
@@ -270,12 +324,42 @@ namespace CanEmAllMP
             foreach (var id in ids) if (Net.Players.ContainsKey(id)) OnSomeoneJoined(id);
         }
 
+        /// The host is on the end-of-day "good night" screen, the upgrade / continue screen, or game over.
+        private static bool HostBetweenDays()
+        {
+            if (ContinueSync.InPhase) return true;
+            try
+            {
+                var gm = GameManager.Instance;
+                if (gm == null) return false;
+                if (gm.IsGameOver) return true;
+                var gn = gm.screenGoodNight;
+                if (gn != null && gn.activeInHierarchy) return true;
+            }
+            catch { }
+            return false;
+        }
+
         private void OnSomeoneJoined(int id)
         {
             if (!Net.IsHost || id == 0) return;
+            EnemySync.ResendDeform();
             if (!GameApi.InGame) { _lobbyWaiting.Add(id); return; } // in the lobby: wait for START GAME
+            if (HostBetweenDays())
+            {
+                // our save is between days (end-of-day / upgrade screen): a joiner loading it would start a day on
+                // their own, alive in the elevator. Hold them until our next day starts.
+                if (_lobbyWaiting.Add(id))
+                {
+                    Note($"{Net.NameOf(id)} will join when the next day starts");
+                    Net.Begin(Msg.Chat).Put("The host is between days - you'll join as soon as the next day starts");
+                    Net.SendTo(id, DeliveryMethod.ReliableOrdered);
+                }
+                return;
+            }
             Net.Begin(Msg.FriendlyFire).Put(Extras.FriendlyFire);
             Net.SendTo(id, DeliveryMethod.ReliableOrdered);
+            CoopSync.SendPauseMode(id);
             // bring the new client up to date: the host's save first (joiners on the main menu load it)
             try { HostSave.SendTo(id); } catch (Exception e) { Plugin.Log.LogError("Sending save failed: " + e); }
             try { SkillSync.SendFullState(id); } catch (Exception e) { Plugin.Log.LogError(e); }
@@ -379,6 +463,9 @@ namespace CanEmAllMP
                 case Msg.Cursor: Extras.ReceiveCursor(from, r); break;
                 case Msg.Lighting when !Net.IsHost: Extras.ReceiveLighting(r); break;
                 case Msg.MoneyPopup: Extras.ReceiveMoneyPopup(from, r); break;
+                case Msg.PauseMode when Net.IsClient: CoopSync.Receive(from, type, r); break;
+                case Msg.GambleStat when Net.IsHost: PlayerStats.ReceiveGamble(from, r); break;
+                case Msg.MailOpen: MailSync.Receive(from, r); break;
                 case Msg.FriendlyFire when Net.IsClient:
                 {
                     bool ff = r.GetBool();
@@ -401,6 +488,9 @@ namespace CanEmAllMP
                 case Msg.EnemySnapshot when Net.IsClient:
                     EnemySync.ClientReceive(r);
                     break;
+                case Msg.EnemyDeform when Net.IsClient:
+                    EnemySync.ClientReceiveDeform(r);
+                    break;
                 case Msg.EnemyDamaged when Net.IsClient:
                     EnemySync.ClientReceiveDamage(r);
                     break;
@@ -418,6 +508,11 @@ namespace CanEmAllMP
                 case Msg.CanOwned when Net.IsHost: CanSync.Hold.HostReceiveStream(from, r); break;
                 case Msg.CanRewarded when Net.IsHost: CanSync.HostReceiveRewarded(from, r); break;
                 case Msg.CanRelease when Net.IsHost: CanSync.Hold.HostReceiveRelease(from, r); break;
+                case Msg.CrateSnapshot when Net.IsClient: CrateSync.ClientReceive(r); break;
+                case Msg.CrateOwner when Net.IsClient: CrateSync.Hold.ClientReceiveOwner(r); break;
+                case Msg.CrateClaim when Net.IsHost: CrateSync.Hold.HostReceiveClaim(from, r); break;
+                case Msg.CrateOwned when Net.IsHost: CrateSync.Hold.HostReceiveStream(from, r); break;
+                case Msg.CrateRelease when Net.IsHost: CrateSync.Hold.HostReceiveRelease(from, r); break;
                 case Msg.EnemyBurn when Net.IsHost:
                     EnemySync.HostReceiveBurn(r, from);
                     break;
@@ -551,16 +646,18 @@ namespace CanEmAllMP
 
         /// Used by the game-style MULTIPLAYER screen.
         public string FieldName => _nameField ?? "";
-        public string FieldAddress => _addrField ?? "";
+        /// The address box holds the lobby code in Online mode, the IP in Direct mode.
+        public string FieldAddress => (NetSession.UseOnline ? _codeField : _addrField) ?? "";
         public string FieldPort => _portField ?? "";
         public void ApplyFields(string name, string address, string port)
         {
-            _nameField = name; _addrField = address; _portField = port;
+            _nameField = name; _portField = port;
+            if (NetSession.UseOnline) _codeField = address; else _addrField = address;
             SaveFields();
         }
         public void Disconnect()
         {
-            Net.Shutdown(); ClearAvatars(); EnemySync.Reset(); CanSync.Reset(); CoopSync.Reset(); ContinueSync.Reset(); Extras.Reset(); GambleSync.Reset(); FactorySync.Reset(); Feed("Left session");
+            Net.Shutdown(); ClearAvatars(); EnemySync.Reset(); CanSync.Reset(); CrateSync.Reset(); CoopSync.Reset(); ContinueSync.Reset(); Extras.Reset(); GambleSync.Reset(); FactorySync.Reset(); Feed("Left session");
             if (HostSave.InMainMenu) HostSave.OnMainMenu();
         }
 
@@ -607,6 +704,9 @@ namespace CanEmAllMP
         private void DrawNameTags()
         {
             if (!Net.Connected) return;
+            // IMGUI draws over the game's menus, so hide the tags whenever a menu is up: paused, the cursor is free
+            // (shop / skill tree / end-of-day screens / emote wheel), or one of our screens is open
+            if (GameApi.IsPaused || MenuOpen || MenuUi.ScreenOpen || PauseUi.Open || Cursor.lockState != CursorLockMode.Locked) return;
             var cam = Camera.main;
             if (cam == null) return;
             foreach (var a in _avatars.Values)
@@ -631,7 +731,7 @@ namespace CanEmAllMP
         private void TickNotices()
         {
             string toast = _toast != null && Time.unscaledTime < _toastUntil ? _toast : null;
-            NoticeUi.Tick(CurrentWaitText(), toast);
+            NoticeUi.Tick(Loc.T(CurrentWaitText()), Loc.T(toast));
         }
 
         private void DrawHud()
@@ -641,12 +741,11 @@ namespace CanEmAllMP
                 var tr = new Rect(0, Screen.height * 0.32f, Screen.width, 40);
                 var old = Styles.Center.fontSize;
                 Styles.Center.fontSize = 28;
-                GUI.color = Color.black; GUI.Label(new Rect(tr.x + 2, tr.y + 2, tr.width, tr.height), _toast, Styles.Center);
-                GUI.color = Color.white; GUI.Label(tr, _toast, Styles.Center);
+                GUI.color = Color.black; GUI.Label(new Rect(tr.x + 2, tr.y + 2, tr.width, tr.height), Loc.T(_toast), Styles.Center);
+                GUI.color = Color.white; GUI.Label(tr, Loc.T(_toast), Styles.Center);
                 Styles.Center.fontSize = old;
             }
-            var waitText = !string.IsNullOrEmpty(ContinueSync.VisibleText) ? ContinueSync.VisibleText
-                         : !string.IsNullOrEmpty(ExitSync.WaitingText) ? ExitSync.WaitingText : CoopSync.WaitingText;
+            var waitText = Loc.T(CurrentWaitText());
             if (!string.IsNullOrEmpty(waitText) && !NoticeUi.Working)
             {
                 var wr = new Rect(0, Screen.height * 0.18f, Screen.width, 30);
@@ -654,23 +753,24 @@ namespace CanEmAllMP
                 GUI.color = Color.white; GUI.Label(wr, waitText, Styles.Center);
             }
             float y = 8;
-            if (Net.Active)
+            if (Net.Active && MenuOpen)   // status line only while the F8 panel is open (Esc > MULTIPLAYER / Tab show players + ping)
             {
-                var line = Net.IsHost ? $"MP Host | {Net.Players.Count} player(s)" : $"MP Client | ping {Net.PingMs}ms | {Net.Status}";
+                var line = Net.IsHost ? $"MP Host | {(Net.Online ? (Net.LobbyCode != null ? "code " + Net.LobbyCode + " | " : "getting code... | ") : "")}{Net.Players.Count} player(s)"
+                                      : $"MP Client | ping {Net.PingMs}ms | {Net.Status}";
                 GUI.Label(new Rect(10, y, 600, 22), line);
                 y += 20;
             }
             for (int i = 0; i < _feed.Count; i++)
             {
                 if (Time.unscaledTime - _feedTime[i] > 8f) continue;
-                GUI.Label(new Rect(10, y, 700, 22), _feed[i]);
+                GUI.Label(new Rect(10, y, 700, 22), Loc.T(_feed[i]));
                 y += 18;
             }
         }
 
         private void DrawPanel()
         {
-            float w = 400, h = 376;
+            float w = 400, h = 404;
             float x = (Screen.width - w) / 2, y = (Screen.height - h) / 2;
             GUI.Box(new Rect(x, y, w, h), "Can 'Em All Multiplayer  (" + Plugin.MenuKey.Value + " to close)");
             float cy = y + 30;
@@ -683,9 +783,24 @@ namespace CanEmAllMP
                 if (pick >= 0) { Plugin.PlayerColor.Value = pick; Net.RequestColor(pick); }
             }
             cy += 36;
-            GUI.Label(new Rect(x + 15, cy, 80, 22), "Address"); _addrField = TextBox(2, new Rect(x + 100, cy, 200, 22), _addrField, 64);
-            if (GUI.Button(new Rect(x + 305, cy, 55, 22), "Paste")) { try { var c = GUIUtility.systemCopyBuffer; if (!string.IsNullOrEmpty(c)) _addrField = c.Trim(); } catch { } } cy += 30;
-            GUI.Label(new Rect(x + 15, cy, 80, 22), "Port"); _portField = TextBox(3, new Rect(x + 100, cy, 80, 22), _portField, 5); cy += 36;
+            bool online = NetSession.UseOnline;
+            GUI.Label(new Rect(x + 15, cy, 80, 22), "Connect");
+            if (!Net.Active && GUI.Button(new Rect(x + 100, cy, 170, 22), online ? "Online (lobby code)" : "Direct IP"))
+                Plugin.Connection.Value = online ? "Direct" : "Online";
+            else if (Net.Active) GUI.Label(new Rect(x + 100, cy, 260, 22), Net.Online ? "Online" + (Net.IsHost && Net.LobbyCode != null ? " - code " + Net.LobbyCode : "") : "Direct IP");
+            cy += 30;
+            if (online)
+            {
+                GUI.Label(new Rect(x + 15, cy, 80, 22), "Code"); _codeField = TextBox(2, new Rect(x + 100, cy, 200, 22), _codeField, 8);
+                if (GUI.Button(new Rect(x + 305, cy, 55, 22), "Paste")) { try { var c = GUIUtility.systemCopyBuffer; if (!string.IsNullOrEmpty(c)) _codeField = c.Trim(); } catch { } } cy += 36;
+            }
+            else
+            {
+                GUI.Label(new Rect(x + 15, cy, 80, 22), "Address"); _addrField = TextBox(2, new Rect(x + 100, cy, 200, 22), _addrField, 64);
+                if (GUI.Button(new Rect(x + 305, cy, 55, 22), "Paste")) { try { var c = GUIUtility.systemCopyBuffer; if (!string.IsNullOrEmpty(c)) _addrField = c.Trim(); } catch { } } cy += 30;
+                GUI.Label(new Rect(x + 15, cy, 80, 22), "Port"); _portField = TextBox(3, new Rect(x + 100, cy, 80, 22), _portField, 5); cy += 6;
+            }
+            cy += 30;
 
             if (!Net.Active)
             {
@@ -699,13 +814,13 @@ namespace CanEmAllMP
                     if (GUI.Button(new Rect(x + 15, cy, 170, 32), "Host"))
                     {
                         SaveFields();
-                        if (GameApi.InGame) { if (Net.Host(Plugin.Port.Value)) Feed($"Hosting on UDP {Plugin.Port.Value}. Friends join with your public IP."); }
+                        if (GameApi.InGame) { if (Net.StartHost()) Note(Net.HostingText); }
                         else { MenuOpen = true; ToggleMenu(); MenuUi.HostFromMenu(); }
                     }
                     if (!GameApi.InGame && GUI.Button(new Rect(x + 195, cy, 170, 32), "Join"))
                     {
                         SaveFields();
-                        Net.Join(Plugin.LastAddress.Value.Trim(), Plugin.Port.Value);
+                        Net.StartJoin();
                     }
                 }
             }
@@ -736,7 +851,9 @@ namespace CanEmAllMP
                 GUI.Label(new Rect(x + 15, cy, 350, 44), "Players: " + string.Join(", ", names));
             }
             cy += 44;
-            GUI.Label(new Rect(x + 15, cy, 350, 40), "Host: load your save, press Host, forward UDP " + Plugin.Port.Value + ".\nJoiner: Join from the MAIN MENU to play on the host's save.");
+            GUI.Label(new Rect(x + 15, cy, 350, 40), online
+                ? "Host: press Host and send friends the lobby code.\nJoiner: Join from the MAIN MENU with the code."
+                : "Host: load your save, press Host, forward UDP " + Plugin.Port.Value + ".\nJoiner: Join from the MAIN MENU to play on the host's save.");
         }
 
         // GUI.TextField is stripped from this game's build, so this is a minimal replacement:
@@ -777,6 +894,7 @@ namespace CanEmAllMP
         {
             Plugin.PlayerName.Value = string.IsNullOrWhiteSpace(_nameField) ? "Player" : _nameField.Trim();
             Plugin.LastAddress.Value = _addrField ?? "";
+            Plugin.LastCode.Value = (_codeField ?? "").Trim();
             if (int.TryParse(_portField, out var p) && p > 0 && p < 65536) Plugin.Port.Value = p;
             Net.LocalName = Plugin.PlayerName.Value;
         }

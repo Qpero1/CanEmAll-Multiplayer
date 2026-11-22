@@ -48,7 +48,7 @@ namespace CanEmAllMP
                 }
                 else
                 {
-                    _name.text = "Nobody to watch";
+                    _name.text = Loc.T("Nobody to watch");
                     if (_dot.gameObject.activeSelf) _dot.gameObject.SetActive(false);
                 }
             }
@@ -84,9 +84,10 @@ namespace CanEmAllMP
             // title
             var title = Label(Child(rt, "Title"));
             Place(RT(title.transform), new Vector2(0.5f, 1f), new Vector2(0.5f, 1f), new Vector2(0f, -22f), new Vector2(700f, 56f));
-            title.text = "SPECTATING";
+            Loc.Set(title, "SPECTATING");
             title.alignment = TextAlignmentOptions.Midline;
             title.fontSize = 44;
+            title.enableWordWrapping = false; Loc.Fit(title, 0.5f);
 
             // the card
             var box = Child(rt, "General");
@@ -120,7 +121,8 @@ namespace CanEmAllMP
             Place(RT(hintGo), new Vector2(0f, 0f), new Vector2(0f, 0f), new Vector2(34f, 12f), new Vector2(400f, 22f));
             _hint.fontSize = 13; _hint.alignment = TextAlignmentOptions.MidlineLeft; _hint.enableWordWrapping = false;
             _hint.color = new Color(_hint.color.r, _hint.color.g, _hint.color.b, 0.75f);
-            _hint.text = "CLICK / SPACE for the next player  -  you're back when the day ends";
+            Loc.Set(_hint, "CLICK / SPACE for the next player  -  you're back when the day ends");
+            Loc.Fit(_hint, 0.65f);
 
             // drop the settings rows
             var keep = new HashSet<IntPtr> { nameGo.Pointer, dot.Pointer, hintGo.Pointer };

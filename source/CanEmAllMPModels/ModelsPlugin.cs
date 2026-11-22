@@ -28,7 +28,7 @@ namespace CanEmAllMPModels
     public class ModelsPlugin : BasePlugin
     {
         public const string Guid = "arkin.canemall.multiplayer.models";
-        public const string Version = "1.12.1";
+        public const string Version = "1.15.0";
         private const float DefaultHeight = 2.4f;
         private const float DefaultVerticalOffset = -0.25f;
         private const int ConfigRevision = 3;

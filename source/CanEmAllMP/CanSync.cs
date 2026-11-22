@@ -30,6 +30,7 @@ namespace CanEmAllMP
             Hold.RbOf = c => c.rb;
             Hold.InMachine = c => c.IsProcessed;
             Hold.KeepDynamic = c => !c.IsProcessed;
+            Hold.Carried = c => CrateSync.IsCarried(c.Pointer);
             Hold.LocalChanged = (id, c, local) =>
             {
                 if (!_puppets.TryGetValue(id, out var p)) return;
@@ -42,8 +43,8 @@ namespace CanEmAllMP
                 {
                     if (p.Rb != null) p.Rb.isKinematic = true;
                     var t = c.transform;
-                    p.FromPos = p.ToPos = t.position; p.FromRot = p.ToRot = t.rotation;
-                    p.LerpStart = p.LastUpdate = Time.time;
+                    p.Buf.Reset(t.position, t.rotation);
+                    p.LastUpdate = Time.time;
                 }
             };
         }
@@ -65,6 +66,14 @@ namespace CanEmAllMP
             if (c == null || !Net.Connected || !Plugin.SyncEnemies.Value) return true;
             if (Net.IsHost) return c.IsInPool || Hold.HostGrab(HostIdOf(c), force);
             return !_puppetIdByPtr.TryGetValue(c.Pointer, out var id) || Hold.ClientGrab(id, force);
+        }
+
+        /// A can is riding in a crate our player carries: take it over so the crate's physics carries it.
+        public static void ClaimCarried(Can c)
+        {
+            if (c == null || c.IsInPool || c.IsProcessed || !Net.Connected || !Plugin.SyncEnemies.Value) return;
+            if (Net.IsHost) { var id = HostIdOf(c); if (Hold.HostHolder(id) != 0) Hold.HostGrab(id, true); }
+            else if (_puppetIdByPtr.TryGetValue(c.Pointer, out var pid) && !Hold.IsLocal(pid)) Hold.ClientGrab(pid, true);
         }
 
         private static readonly List<ushort> _ids = new List<ushort>();
@@ -167,7 +176,8 @@ namespace CanEmAllMP
                     var id = HostIdOf(c);
                     _present.Add(id);
                     var t = c.transform;
-                    var s = new Sent { Pos = t.position, Rot = t.rotation, Price = c.price, Qty = (byte)Math.Min(255, c.quantity), Tex = (byte)TextureIndex(c), Time = now };
+                    if (!Hold.HostRemotePose(id, out var sp, out var sr)) { sp = t.position; sr = t.rotation; }
+                    var s = new Sent { Pos = sp, Rot = sr, Price = c.price, Qty = (byte)Math.Min(255, c.quantity), Tex = (byte)TextureIndex(c), Time = now };
                     if (c.IsShiny) s.Flags |= 1;
                     if (c.IsSmoked) s.Flags |= 2;
                     if (c.HoleInOne) s.Flags |= 4;
@@ -224,8 +234,8 @@ namespace CanEmAllMP
         private class Puppet
         {
             public Can Can; public Rigidbody Rb; public ushort Id;
-            public Vector3 FromPos, ToPos; public Quaternion FromRot, ToRot;
-            public float LastUpdate, LerpStart;
+            public readonly SnapBuffer Buf = new SnapBuffer();
+            public float LastUpdate;
             public int Tex; public byte Flags;
         }
 
@@ -297,8 +307,7 @@ namespace CanEmAllMP
                 byte look = (byte)(flags & 7);
                 if (p.Tex != tex || (p.Flags & 5) != (look & 5)) { p.Tex = tex; p.Flags = look; ApplyLook(p); }
                 else if (p.Flags != look) { p.Flags = look; p.Can.IsSmoked = (look & 2) != 0; }
-                p.FromPos = p.Can.transform.position; p.FromRot = p.Can.transform.rotation;
-                p.ToPos = pos; p.ToRot = rot; p.LerpStart = now;
+                p.Buf.Add(pos, rot);
             }
         }
 
@@ -319,7 +328,9 @@ namespace CanEmAllMP
             catch (Exception e) { Plugin.Log.LogWarning("Can puppet spawn failed: " + e.Message); return null; }
             var rb = c.rb;
             if (rb != null) { rb.isKinematic = true; rb.interpolation = RigidbodyInterpolation.None; }
-            return new Puppet { Tex = tex, Flags = (byte)(flags & 7), Can = c, Rb = rb, Id = id, FromPos = pos, ToPos = pos, FromRot = rot, ToRot = rot, LastUpdate = Time.time, LerpStart = Time.time };
+            var np = new Puppet { Tex = tex, Flags = (byte)(flags & 7), Can = c, Rb = rb, Id = id, LastUpdate = Time.time };
+            np.Buf.Reset(pos, rot);
+            return np;
         }
 
         private static void DestroyPuppet(ushort id, Puppet p)
@@ -421,9 +432,7 @@ namespace CanEmAllMP
                 if (p.Can == null || p.Can.IsInPool) { _remove.Add(kv.Key); continue; }
                 if (Hold.IsLocal(kv.Key)) continue;
                 if (now - p.LastUpdate > StaleAfter) { _remove.Add(kv.Key); continue; }
-                float k = Mathf.Clamp01((now - p.LerpStart) / (1f / 15f));
-                var t = p.Can.transform;
-                t.SetPositionAndRotation(Vector3.Lerp(p.FromPos, p.ToPos, k), Quaternion.Slerp(p.FromRot, p.ToRot, k));
+                if (p.Buf.Sample(out var bp, out var br)) p.Can.transform.SetPositionAndRotation(bp, br);
             }
             foreach (var id in _remove) if (_puppets.TryGetValue(id, out var p)) DestroyPuppet(id, p);
 

@@ -39,9 +39,12 @@ namespace CanEmAllMP
                         // friendly fire: a click, or holding the trigger on automatic weapons
                         string type = WeaponType();
                         bool auto = type == "SMG" || type == "AK47" || type == "FlameThrower" || type == "Chainsaw";
-                        if (m.leftButton.wasPressedThisFrame || auto) Extras.ShooterCheck(type);
+                        // bat / knife / fists: checked per real swing in TickMelee (held = several swings)
+                        bool melee = type == "BaseballBat" || type == "Knife" || type == "";
+                        if (!melee && (m.leftButton.wasPressedThisFrame || auto)) Extras.ShooterCheck(type);
                     }
                 }
+                TickMelee();
                 var kb = Keyboard.current;
                 if (kb != null && kb[Key.T].wasPressedThisFrame && GameApi.CanAct) StartPoint();
             }
@@ -91,6 +94,23 @@ namespace CanEmAllMP
                     if (rs[i] != null && rs[i].enabled) { rs[i].enabled = false; _hidden.Add(rs[i]); }
             }
             catch { }
+        }
+
+        // the game stamps lastPunchTime on every swing (on the bat / knife, or on the Inventory for fists)
+        private static float _lastSwing = -1f;
+        private static string _lastSwingType;
+
+        private static void TickMelee()
+        {
+            if (Emote != 0 || Pointing) return;
+            string type = WeaponType();
+            float t = -1f;
+            if (type == "BaseballBat") { var b = GameApi.WeaponAt(GameApi.CurrentWeaponGlobalIndex)?.TryCast<BaseballBat>(); if (b != null) t = b.lastPunchTime; }
+            else if (type == "Knife") { var k = GameApi.WeaponAt(GameApi.CurrentWeaponGlobalIndex)?.TryCast<Knife>(); if (k != null) t = k.lastPunchTime; }
+            else if (type == "") { var inv = Inventory.Instance; if (inv != null) t = inv.lastPunchTime; }
+            else { _lastSwingType = null; return; }
+            if (type != _lastSwingType) { _lastSwingType = type; _lastSwing = t; return; } // just switched: not a swing
+            if (t > _lastSwing + 0.0001f) { _lastSwing = t; Extras.ShooterCheck(type); }
         }
 
         private static int _typeIdx = -2; private static string _type = "";

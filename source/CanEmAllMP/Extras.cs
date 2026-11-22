@@ -105,12 +105,36 @@ namespace CanEmAllMP
             };
         private const float BodyHeight = 2.3f;
 
+        /// Debug target that isn't a player (the models add-on's F9 tuning dummy): its feet, or null when there's none.
+        /// Hitting it only plays the hit sound + crosshair locally; nothing is sent.
+        public static Func<Vector3?> TestTarget;
+        private static float _lastTestHit;
+
+        private static void TestTargetCheck(string weaponType)
+        {
+            var feet = TestTarget?.Invoke();
+            bool melee = weaponType == "BaseballBat" || weaponType == "Knife" || weaponType == "";
+            if (feet == null || Time.unscaledTime - _lastTestHit < (melee ? 0.1f : 0.3f)) return;
+            if (!HitShapes.TryGetValue(weaponType ?? "", out var shape)) return;
+            var cam = Player.Instance?.mainCamera;
+            if (cam == null) return;
+            var o = cam.transform.position; var dir = cam.transform.forward;
+            var f = feet.Value;
+            float t = RayToSegment(o, dir, f + Vector3.up * 0.2f, f + Vector3.up * BodyHeight, out float dist);
+            if (t <= 0f || t > shape.range || dist > shape.radius) return;
+            _lastTestHit = Time.unscaledTime;
+            Plugin.Log.LogInfo($"[test] hit the tuning dummy with {(weaponType == "" ? "fists" : weaponType)} at {t:0.0} m");
+            HitSound.Play(); HitMarker.Show();
+        }
+
         /// Called when the local player attacks (and repeatedly while holding fire on automatic weapons).
         public static void ShooterCheck(string weaponType)
         {
+            try { TestTargetCheck(weaponType); } catch { }
             if (!FriendlyFire || !CoopSync.Active || MpManager.Instance == null) return;
             if (!HitShapes.TryGetValue(weaponType ?? "", out var shape)) return; // vacuum etc.
-            if (Time.unscaledTime - _lastHitSent < 0.3f) return;
+            bool melee = weaponType == "BaseballBat" || weaponType == "Knife" || weaponType == "";
+            if (Time.unscaledTime - _lastHitSent < (melee ? 0.1f : 0.3f)) return;
             var p = Player.Instance;
             var cam = p?.mainCamera;
             if (cam == null) return;
@@ -143,7 +167,8 @@ namespace CanEmAllMP
 
             _lastHitSent = Time.unscaledTime;
             Plugin.Log.LogInfo($"Friendly fire: hit player {best} with {(weaponType == "" ? "fists" : weaponType)} at {bestT:0.0} m");
-            MpManager.Instance.Feed($"Hit {Net.NameOf(best)}");
+            MpManager.Instance.Note($"Hit {Net.NameOf(best)}");
+            HitSound.Play(); HitMarker.Show();
             if (Net.IsHost) DeliverHit(best, Net.LocalId);
             else { Net.Begin(Msg.PlayerHit).Put(best); Net.Send(DeliveryMethod.ReliableOrdered); }
         }
@@ -179,7 +204,8 @@ namespace CanEmAllMP
             foreach (int id in killed)
             {
                 Plugin.Log.LogInfo($"Friendly fire: rocket killed player {id}");
-                MpManager.Instance.Feed($"Rocketed {Net.NameOf(id)}!");
+                MpManager.Instance.Note($"Rocketed {Net.NameOf(id)}");
+                HitSound.Play(); HitMarker.Show();
                 if (Net.IsHost) DeliverHit(id, Net.LocalId, true);
                 else { Net.Begin(Msg.PlayerHit).Put(id); Net.W.Put((byte)1); Net.Send(DeliveryMethod.ReliableOrdered); }
             }
@@ -237,7 +263,7 @@ namespace CanEmAllMP
                     VacuumPull.Knockback(away.normalized * 14f + Vector3.up * 6f); // blown up
                 }
                 catch { }
-                MpManager.Instance?.Feed($"Rocketed by {Net.NameOf(shooter)}!");
+                MpManager.Instance?.Note($"Rocketed by {Net.NameOf(shooter)}");
                 Spectate.Kill();
                 return;
             }
@@ -264,9 +290,9 @@ namespace CanEmAllMP
             {
                 _friendlyHits = 0;
                 try { p.Damage(); } catch (Exception e) { Plugin.Log.LogWarning("Friendly fire damage failed: " + e.Message); }
-                MpManager.Instance?.Feed($"Shot by {Net.NameOf(shooter)}: took damage!");
+                MpManager.Instance?.Note($"Shot by {Net.NameOf(shooter)}: took damage");
             }
-            else MpManager.Instance?.Feed($"Shot by {Net.NameOf(shooter)} ({_friendlyHits}/{FriendlyHitsPerDamage})");
+            else MpManager.Instance?.Note($"Shot by {Net.NameOf(shooter)} ({_friendlyHits}/{FriendlyHitsPerDamage})");
         }
 
         // ================================================================ cursors + info boxes on the upgrade screen

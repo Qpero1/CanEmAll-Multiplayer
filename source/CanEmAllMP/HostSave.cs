@@ -103,22 +103,51 @@ namespace CanEmAllMP
                 MpManager.Instance?.Feed("Downloading the host's save...");
         }
 
+        private const int MaxCompressed = 4 << 20, MaxJson = 32 << 20;
+
         public static void Receive(NetDataReader r)
         {
             int total = r.GetInt();
             int off = r.GetInt();
             var part = r.GetBytesWithLength();
             if (!WaitingForSave) return;
+            // a real save is a few KB: refuse absurd sizes (a bad host could otherwise make us allocate gigabytes)
+            if (total <= 0 || total > MaxCompressed || part == null || off < 0 || off + part.Length > total)
+            {
+                Plugin.Log.LogWarning($"[MP] host save chunk refused (size {total}, offset {off})");
+                _rx = null;
+                return;
+            }
             if (_rx == null || _rx.Length != total) { _rx = new byte[total]; _rxGot = 0; }
             Buffer.BlockCopy(part, 0, _rx, off, part.Length);
             _rxGot += part.Length;
             if (_rxGot < total) return;
 
             string json;
-            using (var ms = new MemoryStream(_rx))
-            using (var gz = new GZipStream(ms, CompressionMode.Decompress))
-            using (var sr = new StreamReader(gz, Encoding.UTF8))
-                json = sr.ReadToEnd();
+            try
+            {
+                // unpack with a cap, so a "zip bomb" can't eat all our memory
+                using (var ms = new MemoryStream(_rx))
+                using (var gz = new GZipStream(ms, CompressionMode.Decompress))
+                using (var outMs = new MemoryStream())
+                {
+                    var buf = new byte[65536];
+                    int n;
+                    while ((n = gz.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        if (outMs.Length + n > MaxJson) throw new InvalidDataException("host save unpacks to more than " + (MaxJson >> 20) + " MB");
+                        outMs.Write(buf, 0, n);
+                    }
+                    json = Encoding.UTF8.GetString(outMs.GetBuffer(), 0, (int)outMs.Length);
+                }
+            }
+            catch (Exception e)
+            {
+                Plugin.Log.LogWarning("[MP] host save refused: " + e.Message);
+                MpManager.Instance?.Feed("The host's save couldn't be read (see BepInEx log).");
+                _rx = null;
+                return;
+            }
             _rx = null;
             WaitingForSave = false;
             LoadAndStart(json);

@@ -190,7 +190,7 @@ namespace CanEmAllMP
         public static void CleanAllScenePrefix()
         {
             if (!Net.IsHost || !Net.Connected) return;
-            try { EnemySync.ReclaimAll(); CanSync.ReclaimAll(); } catch (System.Exception e) { Plugin.Log.LogError(e); }
+            try { EnemySync.ReclaimAll(); CanSync.ReclaimAll(); CrateSync.ReclaimAll(); } catch (System.Exception e) { Plugin.Log.LogError(e); }
         }
 
         // ---- upgrade-screen info box: what each player hovers is shown to everyone
@@ -254,6 +254,15 @@ namespace CanEmAllMP
             if (Net.IsClient && Net.Connected) { try { CanSync.ReapplyLook(__instance); } catch { } }
         }
 
+        /// The crate ("basket"): same holding rules as cans.
+        [HarmonyPrefix, HarmonyPatch(typeof(Crate), nameof(Crate.OnGrabbed))]
+        public static void CrateGrabbedPrefix(Crate __instance)
+        {
+            if (!Net.Connected || !Plugin.SyncEnemies.Value) return;
+            try { CrateSync.LocalGrab(__instance, !VacuumHelper.InSuck); }
+            catch (System.Exception e) { Plugin.Log.LogError(e); }
+        }
+
         [HarmonyPrefix, HarmonyPatch(typeof(Can), nameof(Can.OnGrabbed))]
         public static void CanGrabbedPrefix(Can __instance)
         {
@@ -278,6 +287,10 @@ namespace CanEmAllMP
             if (Net.IsClient && Net.Connected && !EnemySync.Replaying && EnemySync.IsRemote(__instance))
                 EnemySync.ClientForwardBurn(__instance, __0);
         }
+
+        /// Burnt / damaged look of host creatures on joiners (the shader values are local to each machine).
+        [HarmonyPostfix, HarmonyPatch(typeof(Enemy), nameof(Enemy.LateUpdate))]
+        public static void EnemyLookPostfix(Enemy __instance) { if (Net.IsClient) EnemySync.ApplyLook(__instance); }
 
         // ---------------------------------------------------------------- explosions / shockwaves
 
@@ -525,6 +538,21 @@ namespace CanEmAllMP
         }
 
         /// A replayed spin lands on the spinner's result.
+        /// Mail tab: a letter we open opens for everyone.
+        [HarmonyPostfix, HarmonyPatch(typeof(MailManager), nameof(MailManager.Open))]
+        public static void MailOpenPostfix(MailEntry entry)
+        {
+            try { MailSync.LocalOpened(entry); } catch (System.Exception e) { Plugin.Log.LogError(e); }
+        }
+
+        /// Stats: our own spin's result (replays of other players' spins don't count for us).
+        [HarmonyPostfix, HarmonyPatch(typeof(SlotMachine), nameof(SlotMachine.ShowResult))]
+        public static void SlotShowResultPostfix(SlotMachine __instance, bool win, long moneyChange)
+        {
+            if (!Net.Connected || GambleSync.Replaying) return;
+            try { PlayerStats.LocalSpinResult(__instance.currentBet, win ? moneyChange : 0); } catch (System.Exception e) { Plugin.Log.LogError(e); }
+        }
+
         [HarmonyPrefix, HarmonyPatch(typeof(SlotMachine), nameof(SlotMachine.GenerateResult))]
         public static bool GenerateResultPrefix(ref Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<int> __result)
         {
@@ -631,6 +659,13 @@ namespace CanEmAllMP
             return false;
         }
 
+        /// Hosting: back up the save right before the game overwrites it (session start + once per day).
+        [HarmonyPrefix, HarmonyPatch(typeof(SaveManager), nameof(SaveManager.Save)), AllOverloads]
+        public static void SaveBackupPrefix()
+        {
+            try { SaveBackups.BeforeSave(); } catch (System.Exception e) { Plugin.Log.LogError(e); }
+        }
+
         /// Multiplayer save slots: redirect the one path every save read/write uses.
         [HarmonyPostfix, HarmonyPatch(typeof(SaveManager), nameof(SaveManager.SavePath), MethodType.Getter)]
         public static void SavePathPostfix(ref string __result)
@@ -666,7 +701,7 @@ namespace CanEmAllMP
         public static void PlayerMovePostfix(Player __instance) => VacuumPull.AfterMove(__instance);
 
         [HarmonyPrefix, HarmonyPatch(typeof(Player), nameof(Player.RotateCamera))]
-        public static bool RotateCameraPrefix() => !MpManager.MenuOpen && !Spectate.Dead;
+        public static bool RotateCameraPrefix() => !MpManager.MenuOpen && !Spectate.Dead && !Scoreboard.CursorFree;
 
         /// Stop WASD/jump reaching the player while typing in the panel.
         [HarmonyPrefix, HarmonyPatch(typeof(Player), nameof(Player.ReadInput))]
@@ -678,6 +713,6 @@ namespace CanEmAllMP
         }
 
         [HarmonyPrefix, HarmonyPatch(typeof(Inventory), nameof(Inventory.Update))]
-        public static bool InventoryUpdatePrefix() => !MpManager.MenuOpen && !Spectate.Dead;
+        public static bool InventoryUpdatePrefix() => !MpManager.MenuOpen && !Spectate.Dead && !Scoreboard.CursorFree;
     }
 }

@@ -258,7 +258,9 @@ namespace CanEmAllMPModels
             }
             _dummy.Anim = anim;
             _dummy.Hand = WeaponVisuals.FindHand(model);
-            Say("Test dummy spawned 2.5 m in front of you");
+            // debug: hitting the dummy plays the hit sound + crosshair (the main mod's friendly-fire check)
+            Extras.TestTarget = () => _dummyRoot != null && _dummy != null && _dummy.Corpse == null ? _dummyRoot.transform.position : (Vector3?)null;
+            Say("Test dummy spawned 2.5 m in front of you - hit it to test the hit sound / crosshair");
         }
 
         private static void RemoveDummy()
@@ -355,6 +357,7 @@ namespace CanEmAllMPModels
             if (_dummy == null)
             {
                 if (GUI.Button(new Rect(_x + 12, _cy, 200, 26), "Spawn test dummy")) SpawnDummy();
+                if (GUI.Button(new Rect(_x + 220, _cy, 150, 26), "Test hit sound")) Say(HitSound.Test());
             }
             else
             {
@@ -378,7 +381,7 @@ namespace CanEmAllMPModels
             _cy += 38;
 
             if (!string.IsNullOrEmpty(_status) && Time.unscaledTime - _statusAt < 6f)
-                GUI.Label(new Rect(_x + 12, _cy, 420, 22), _status);
+                GUI.Label(new Rect(_x + 12, _cy, 420, 44), _status);   // two lines: the sound test's report is long
         }
 
         private static void Header(string text)

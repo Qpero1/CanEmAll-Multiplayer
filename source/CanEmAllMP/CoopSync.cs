@@ -27,9 +27,49 @@ namespace CanEmAllMP
         public static bool ApplyingNetPause;
         private static int _lastSentPause = -1;
 
+        /// The host's "Multiplayer pause" setting (clients get it from the host).
+        ///   true  = pausing pauses everyone (the game's normal pause, shared)
+        ///   false = Esc only opens your own menu; the game keeps running for everyone, nobody can stop the day
+        public static bool SharedPause = true;
+
+        /// Host: the config setting changed (or a player joined): tell the joiners.
+        public static void SendPauseMode(int to = -1)
+        {
+            if (!Net.IsHost) return;
+            Net.Begin(Msg.PauseMode).Put(SharedPause);
+            if (to >= 0) Net.SendTo(to, DeliveryMethod.ReliableOrdered); else Net.Send(DeliveryMethod.ReliableOrdered);
+        }
+
+        /// Host, every frame: follow the config.
+        public static void HostTickPauseMode()
+        {
+            if (!Net.IsHost || SharedPause == Plugin.SharedPause.Value) return;
+            SetPauseMode(Plugin.SharedPause.Value);
+            SendPauseMode();
+        }
+
+        public static void SetPauseMode(bool shared)
+        {
+            if (SharedPause == shared) return;
+            SharedPause = shared;
+            MpManager.Instance?.Feed("Multiplayer pause " + (shared ? "ON" : "OFF - the game keeps running while you're in the menu"));
+            KeepRunningIfLocal();
+        }
+
+        /// Local pause mode: the pause menu may be open, but the game must not stop.
+        public static void KeepRunningIfLocal()
+        {
+            if (SharedPause || !Active) return;
+            var gm = GameManager.Instance;
+            if (gm == null || !gm.IsPaused) return;
+            if (Time.timeScale == 0f) Time.timeScale = 1f;
+            AudioListener.pause = false;
+        }
+
         /// Called after the game's own UpdatePause (postfix).
         public static void OnLocalPauseChanged(bool paused)
         {
+            if (!SharedPause && Active) { KeepRunningIfLocal(); return; } // our menu only: nobody else is told
             if (ApplyingNetPause || !Active) return;
             int p = paused ? 1 : 0;
             if (p == _lastSentPause) return;
@@ -41,8 +81,14 @@ namespace CanEmAllMP
 
         public static void Receive(int from, Msg type, NetDataReader r)
         {
+            if (type == Msg.PauseMode && Net.IsClient)
+            {
+                SetPauseMode(r.GetBool());
+                return;
+            }
             if (type == Msg.Pause)
             {
+                if (!SharedPause) return;
                 bool paused = r.GetBool();
                 int who = r.GetInt();
                 if (Net.IsHost)

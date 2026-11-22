@@ -4,8 +4,11 @@
 
 using System;
 using CanEmAllMP;
+using Il2CppInterop.Runtime;
+using TMPro;
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.UI;
 
 namespace CanEmAllMPModels
 {
@@ -30,6 +33,8 @@ namespace CanEmAllMPModels
         {
             try { Tick(); }
             catch (Exception e) { if (_err++ < 3) ModelsPlugin.L.LogWarning("emote wheel: " + e.Message); }
+            try { UpdateUi(); }
+            catch (Exception e) { if (_err++ < 3) ModelsPlugin.L.LogWarning("emote wheel ui: " + e.Message); _uiFailed = true; HideUi(); }
         }
 
         private static void Tick()
@@ -128,14 +133,195 @@ namespace CanEmAllMPModels
 
         public void OnGUI()
         {
+            if (_ui != null && !_uiFailed) return; // the game-style wheel is showing
             try
             {
                 if (Open) DrawWheel();
                 else if (Gestures.Emote > 0 && Gestures.Emote <= Names.Length)
                     Panel(new Rect(Screen.width / 2f - 150, Screen.height - 120, 300, 28),
-                        $"<b>{Names[Gestures.Emote - 1]}</b>  (move to stop)");
+                        $"<b>{Loc.T(Names[Gestures.Emote - 1])}</b>  " + Loc.T("(move to stop)"));
             }
             catch (Exception e) { if (_err++ < 3) ModelsPlugin.L.LogWarning("emote wheel: " + e.Message); }
+        }
+
+        // ------------------------------------------------------------------ game-style wheel (uGUI)
+        // Same look as the game's menus: dark green rounded tiles with white text (orange when picked, like the
+        // game's dropdown highlight), a cream centre with dark text, the game's own font and sprites.
+
+        private static readonly Color Green = new Color(0.035f, 0.216f, 0.125f, 0.94f);
+        private static readonly Color Orange = new Color(0.996f, 0.608f, 0.216f, 1f);
+        private static readonly Color Cream = new Color(0.969f, 0.859f, 0.749f, 0.96f);
+        private static readonly Color Ink = new Color(0.059f, 0.098f, 0.165f, 1f);
+        private const float UiRadius = 230f;
+
+        private static GameObject _ui, _wheel, _status;
+        private static Image[] _tiles;
+        private static TMP_Text[] _tileText;
+        private static TMP_Text _centreText;
+        private static int _tileLang = -1;
+
+        /// Wheel labels in the game's language (redone if the language is changed).
+        private static void RelabelTiles()
+        {
+            _tileLang = Loc.Lang;
+            if (_centreText != null) _centreText.text = Loc.T("EMOTES");
+            if (_tileText == null) return;
+            for (int i = 0; i < _tileText.Length; i++)
+                if (_tileText[i] != null) _tileText[i].text = i < Names.Length ? Loc.T(Names[i]).ToUpperInvariant() : Loc.T("STOP");
+        }
+        private static TMP_Text _statusText, _hint;
+        private static bool _uiFailed;
+        private static float _nextTry;
+        private static TMP_FontAsset _font, _fontBold;
+        private static Sprite _round;
+        private static float _roundPpu = 1f;
+
+        private static void HideUi() { try { if (_ui != null) _ui.SetActive(false); } catch { } }
+
+        /// The game-style UI is up (other overlays skip their old IMGUI hints).
+        public static bool StyledUi => _ui != null && !_uiFailed;
+
+        private static void UpdateUi()
+        {
+            bool dancing = !Open && Gestures.Emote > 0 && Gestures.Emote <= Names.Length;
+            if (!Open && !dancing) { HideUi(); return; }
+            if (_uiFailed) return;
+            if (_ui == null)
+            {
+                if (Time.unscaledTime < _nextTry) return;
+                _nextTry = Time.unscaledTime + 2f;
+                if (!FindAssets()) return;          // not in game yet: the IMGUI fallback draws meanwhile
+                Build();
+            }
+            if (!_ui.activeSelf) _ui.SetActive(true);
+            if (_wheel.activeSelf != Open) _wheel.SetActive(Open);
+            if (_status.activeSelf != dancing) _status.SetActive(dancing);
+            if (dancing)
+            {
+                bool cam = SelfView.Active;
+                _statusText.text = Loc.T(Names[Gestures.Emote - 1]).ToUpperInvariant() + "  <size=70%>" + Loc.T("MOVE TO STOP") + "</size>"
+                                 + (cam ? "\n<size=62%><font-weight=400>" + Loc.T("MOUSE: LOOK AROUND   -   SCROLL: ZOOM") + "</font-weight></size>" : "");
+                var srt = _status.GetComponent<RectTransform>();
+                var want = new Vector2(cam ? 420 : 330, cam ? 70 : 46);
+                if (srt.sizeDelta != want) srt.sizeDelta = want;
+            }
+            if (Open)
+            {
+                for (int i = 0; i < _tiles.Length; i++)
+                {
+                    bool hot = i == _hover;
+                    _tiles[i].color = hot ? Orange : Green;
+                    _tiles[i].rectTransform.localScale = Vector3.one * (hot ? 1.08f : 1f);
+                }
+                _hint.text = Loc.F("Point at one and let go of {0}   -   Esc to cancel", ModelsPlugin.EmoteKey.Value);
+                if (_tileLang != Loc.Lang) RelabelTiles();
+            }
+        }
+
+        private static bool FindAssets()
+        {
+            if (_font == null)
+            {
+                foreach (var o in Resources.FindObjectsOfTypeAll(Il2CppType.Of<TMP_FontAsset>()))
+                {
+                    var f = o?.TryCast<TMP_FontAsset>();
+                    if (f == null) continue;
+                    string n = f.name.ToLowerInvariant();
+                    if (n.Contains("cnextrabold")) _fontBold = f;
+                    else if (n.Contains("cnbold")) _font = f;
+                }
+                if (_font == null) _font = _fontBold;
+                if (_fontBold == null) _fontBold = _font;
+            }
+            if (_round == null)
+            {
+                // take the rounded sprite (and its corner size) from one of the game's own dropdowns
+                foreach (var o in Resources.FindObjectsOfTypeAll(Il2CppType.Of<Image>()))
+                {
+                    var img = o?.TryCast<Image>();
+                    if (img == null || img.sprite == null || img.sprite.name != "roundquad") continue;
+                    _round = img.sprite; _roundPpu = img.pixelsPerUnitMultiplier;
+                    break;
+                }
+            }
+            return _font != null && _round != null;
+        }
+
+        private static RectTransform Rt(GameObject go)
+        {
+            var rt = go.GetComponent<RectTransform>();
+            return rt != null ? rt : go.AddComponent<RectTransform>();
+        }
+
+        private static GameObject Box(Transform parent, string name, Vector2 pos, Vector2 size, Color color)
+        {
+            var go = new GameObject(name);
+            go.transform.SetParent(parent, false);
+            var rt = Rt(go);
+            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.anchoredPosition = pos; rt.sizeDelta = size;
+            var img = go.AddComponent<Image>();
+            img.sprite = _round; img.type = Image.Type.Sliced; img.pixelsPerUnitMultiplier = _roundPpu;
+            img.color = color; img.raycastTarget = false;
+            return go;
+        }
+
+        private static TMP_Text Text(Transform parent, string text, float size, Color color, bool bold)
+        {
+            var go = new GameObject("Text");
+            go.transform.SetParent(parent, false);
+            var rt = Rt(go);
+            rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one; rt.offsetMin = new Vector2(10, 0); rt.offsetMax = new Vector2(-10, 0);
+            var t = go.AddComponent<TextMeshProUGUI>();
+            t.font = bold ? _fontBold : _font;
+            t.text = text; t.fontSize = size; t.color = color;
+            t.alignment = TextAlignmentOptions.Center; t.enableWordWrapping = false; t.richText = true; t.raycastTarget = false;
+            t.enableAutoSizing = true; t.fontSizeMax = size; t.fontSizeMin = size * 0.55f; // longer translations shrink to fit
+            return t;
+        }
+
+        private static void Build()
+        {
+            _ui = new GameObject("MP_EmoteWheel");
+            UnityEngine.Object.DontDestroyOnLoad(_ui);
+            var canvas = _ui.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            canvas.sortingOrder = 400;
+            var scaler = _ui.AddComponent<CanvasScaler>();
+            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+            scaler.referenceResolution = new Vector2(1920, 1080);
+            scaler.matchWidthOrHeight = 0.5f;
+            var root = _ui.transform;
+
+            _wheel = new GameObject("Wheel");
+            _wheel.transform.SetParent(root, false);
+            var wrt = Rt(_wheel); wrt.anchorMin = Vector2.zero; wrt.anchorMax = Vector2.one; wrt.offsetMin = wrt.offsetMax = Vector2.zero;
+
+            var centre = Box(_wheel.transform, "Centre", Vector2.zero, new Vector2(170, 64), Cream);
+            _centreText = Text(centre.transform, "EMOTES", 26, Ink, true);
+
+            int slots = Names.Length + 1;
+            float step = 360f / slots;
+            _tiles = new Image[slots]; _tileText = new TMP_Text[slots];
+            for (int i = 0; i < slots; i++)
+            {
+                float a = i * step * Mathf.Deg2Rad;              // 0 = top, clockwise (same as HoverIndex)
+                var pos = new Vector2(Mathf.Sin(a) * UiRadius, Mathf.Cos(a) * UiRadius);
+                var tile = Box(_wheel.transform, "Slot" + i, pos, new Vector2(190, 60), Green);
+                _tiles[i] = tile.GetComponent<Image>();
+                _tileText[i] = Text(tile.transform, "", 22, Color.white, true);
+            }
+            RelabelTiles();
+            var hint = Box(_wheel.transform, "Hint", new Vector2(0, -UiRadius - 85), new Vector2(560, 40), Cream);
+            _hint = Text(hint.transform, "", 17, Ink, false);
+
+            _status = Box(root, "Dancing", Vector2.zero, new Vector2(330, 46), Green);
+            var srt = _status.GetComponent<RectTransform>();
+            srt.anchorMin = srt.anchorMax = new Vector2(0.5f, 0f); srt.anchoredPosition = new Vector2(0, 130);
+            _statusText = Text(_status.transform, "", 20, Color.white, true);
+
+            _wheel.SetActive(false); _status.SetActive(false);
+            ModelsPlugin.L.LogInfo("emote wheel: game-style UI built");
         }
 
         private static GUIStyle _centered;

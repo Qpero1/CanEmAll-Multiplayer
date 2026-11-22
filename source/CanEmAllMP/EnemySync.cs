@@ -17,7 +17,7 @@ namespace CanEmAllMP
     public static class EnemySync
     {
         private static NetSession Net => MpManager.Net;
-        private const int SnapRecord = 2 + 1 + 12 + 16 + 1 + 1 + 4 + 1 + 1;
+        private const int SnapRecord = 2 + 1 + 12 + 16 + 1 + 1 + 4 + 1 + 1 + 2 + 2;
         private const float Keepalive = 0.5f;     // host: resend unchanged creatures this often
         private const float StaleAfter = 3f;      // client: no news this long -> the puppet goes
 
@@ -114,6 +114,7 @@ namespace CanEmAllMP
             try { Hold.HostResetAll(); } catch { }
             Hold.Reset();
             _hostIds.Clear(); _hostById.Clear(); _sent.Clear(); _lastPresent.Clear(); _nextId = 1;
+            _deformSent.Clear(); _pendingDeform.Clear();
             foreach (var p in _puppets.Values)
                 if (p.Enemy != null) { VacuumHelper.Forget(p.Enemy); UnityEngine.Object.Destroy(p.Enemy.gameObject); }
             _puppets.Clear(); _puppetIdByPtr.Clear();
@@ -125,7 +126,7 @@ namespace CanEmAllMP
         private static readonly Dictionary<ushort, Enemy> _hostById = new Dictionary<ushort, Enemy>();
         private static HashSet<ushort> _present = new HashSet<ushort>(), _lastPresent = new HashSet<ushort>();
         private static readonly List<ushort> _gone = new List<ushort>();
-        private struct Sent { public Vector3 Pos; public Quaternion Rot; public byte Flags, State, Holder, Epoch; public float Health, Time; }
+        private struct Sent { public Vector3 Pos; public Quaternion Rot; public byte Flags, State, Holder, Epoch; public float Health, Time, Burn, Dmg; }
         private static readonly Dictionary<ushort, Sent> _sent = new Dictionary<ushort, Sent>();
         private static readonly List<(Enemy e, ushort id, Sent s)> _toSend = new List<(Enemy, ushort, Sent)>();
         private static ushort _nextId = 1;
@@ -165,6 +166,7 @@ namespace CanEmAllMP
         {
             net.Begin(Msg.EnemyGone).Put(id);
             net.Send(DeliveryMethod.ReliableOrdered);
+            _deformSent.Remove(id);
             _hostById.TryGetValue(id, out var obj);
             Hold.HostForget(id, obj != null ? obj : null);
             if (!ReferenceEquals(obj, null)) _hostIds.Remove(obj.Pointer);
@@ -192,6 +194,7 @@ namespace CanEmAllMP
                     if (e.IsShiny) s.Flags |= 2;
                     if (!e.gameObject.activeInHierarchy) s.Flags |= 4;
                     if (e.panicTimer > 0f) s.Flags |= 8;
+                    ReadLook(e, out s.Burn, out s.Dmg);
                     if (_sent.TryGetValue(id, out var last) && (last.Flags & 1) != 0 && (s.Flags & 1) == 0)
                     {
                         // a pooled creature came back to life: it's a new creature for everyone
@@ -201,10 +204,12 @@ namespace CanEmAllMP
                         last = default;
                     }
                     _present.Add(id);
+                    HostDeform(net, e, id);
                     s.Holder = Hold.HostHolder(id); s.Epoch = Hold.HostEpoch(id);
                     if (last.Time > 0 && now - last.Time < Keepalive && last.Flags == s.Flags && last.State == s.State
                         && last.Holder == s.Holder && last.Epoch == s.Epoch && Mathf.Abs(last.Health - s.Health) < 0.01f
-                        && (last.Pos - s.Pos).sqrMagnitude < 0.000025f && Quaternion.Angle(last.Rot, s.Rot) < 0.5f)
+                        && (last.Pos - s.Pos).sqrMagnitude < 0.000025f && Quaternion.Angle(last.Rot, s.Rot) < 0.5f
+                        && Mathf.Abs(last.Burn - s.Burn) < 0.01f && Mathf.Abs(last.Dmg - s.Dmg) < 0.01f)
                         continue;
                     _sent[id] = s;
                     _toSend.Add((e, id, s));
@@ -224,6 +229,7 @@ namespace CanEmAllMP
                     w.PutVec(s.Pos); w.PutQuat(s.Rot);
                     w.Put(s.Flags); w.Put(s.State); w.Put(s.Health);
                     w.Put(s.Holder); w.Put(s.Epoch);
+                    w.Put(Mathf.FloatToHalf(s.Burn)); w.Put(Mathf.FloatToHalf(s.Dmg));
                 }
                 net.Send(DeliveryMethod.Unreliable);
             }
@@ -356,7 +362,100 @@ namespace CanEmAllMP
             public Quaternion FromRot, ToRot;
             public float LastUpdate, LerpStart;
             public bool Dead;
+            public float Burn, Dmg;       // the host's burnt / damaged shader values
+            public Vector4[] Slots;       // the host's damage slots (dents / broken-off parts)
         }
+
+        // -------------------------------------------------- dents / broken-off parts
+        // Every hit stores a "damage slot" (a vector per slot in the creature's shader) that dents the mesh and
+        // breaks parts off. Hits on corpses and shockwaves aren't replayed as hits, so the host sends the slots
+        // themselves whenever a creature's hit counter changes, and joiners' copies show exactly the host's.
+
+        private static int _deformLogged;
+        private static readonly Dictionary<ushort, int> _deformSent = new Dictionary<ushort, int>();
+        private static readonly Dictionary<ushort, Vector4[]> _pendingDeform = new Dictionary<ushort, Vector4[]>();
+
+        /// Host: a player joined - send everyone's current dents again.
+        public static void ResendDeform() => _deformSent.Clear();
+
+        private static void HostDeform(NetSession net, Enemy e, ushort id)
+        {
+            try
+            {
+                int count = e.damageCount;
+                if (_deformSent.TryGetValue(id, out var last) && last == count) return;
+                if (count == 0 && !_deformSent.ContainsKey(id)) { _deformSent[id] = 0; return; } // untouched: nothing to send
+                var ids = Enemy.DamageSlots;
+                var mpb = e.MaterialPropertyBlock;
+                if (ids == null || mpb == null) return;
+                int n = Math.Min(ids.Length, 32);
+                var w = net.Begin(Msg.EnemyDeform);
+                w.Put(id); w.Put((byte)n);
+                for (int i = 0; i < n; i++)
+                {
+                    var v = mpb.GetVector(ids[i]);
+                    w.Put(v.x); w.Put(v.y); w.Put(v.z); w.Put(v.w);
+                }
+                net.Send(DeliveryMethod.ReliableOrdered);
+                _deformSent[id] = count;
+                if (_deformLogged++ < 2)
+                    Plugin.Log.LogInfo($"[MP] dents for creature {id}: {n} slots, hit count {count}, first {mpb.GetVector(ids[0])}");
+            }
+            catch (Exception ex) { if (_lookErr++ < 3) Plugin.Log.LogWarning("[MP] deform send: " + ex.Message); }
+        }
+
+        public static void ClientReceiveDeform(NetPacketReader r)
+        {
+            var id = r.GetUShort();
+            int n = r.GetByte();
+            var slots = new Vector4[n];
+            for (int i = 0; i < n; i++) slots[i] = new Vector4(r.GetFloat(), r.GetFloat(), r.GetFloat(), r.GetFloat());
+            if (_puppets.TryGetValue(id, out var p) && p.Enemy != null) p.Slots = slots;
+            else _pendingDeform[id] = slots;   // the creature's first snapshot hasn't arrived yet
+        }
+
+        // -------------------------------------------------- burnt / damaged look
+        // Burning (flamethrower, explosive bullets) and hit damage only change a creature's shader values on
+        // the machine where they happen. The host sends its values with each snapshot and puppets show
+        // whichever is stronger: the host's, or what this player did to it themselves.
+
+        private static void ReadLook(Enemy e, out float burn, out float dmg)
+        {
+            burn = 0f; dmg = 0f;
+            try
+            {
+                var mpb = e.MaterialPropertyBlock;
+                if (mpb == null) return;
+                burn = mpb.GetFloat(Enemy.Burning);
+                dmg = mpb.GetFloat(Enemy.GlobalDamage);
+            }
+            catch { }
+        }
+
+        /// After the creature's own LateUpdate (which writes its shader values): show the host's burn / damage.
+        public static void ApplyLook(Enemy e)
+        {
+            if (!Net.IsClient || e == null || !_puppetIdByPtr.TryGetValue(e.Pointer, out var id)) return;
+            if (!_puppets.TryGetValue(id, out var p) || (p.Burn <= 0.001f && p.Dmg <= 0.001f && p.Slots == null)) return;
+            try
+            {
+                var mpb = e.MaterialPropertyBlock;
+                var mr = e.meshRenderer;
+                if (mpb == null || mr == null) return;
+                bool changed = false;
+                if (p.Burn > mpb.GetFloat(Enemy.Burning) + 0.001f) { mpb.SetFloat(Enemy.Burning, p.Burn); changed = true; }
+                if (p.Dmg > mpb.GetFloat(Enemy.GlobalDamage) + 0.001f) { mpb.SetFloat(Enemy.GlobalDamage, p.Dmg); changed = true; }
+                if (p.Slots != null)
+                {
+                    var ids = Enemy.DamageSlots;
+                    for (int i = 0; ids != null && i < p.Slots.Length && i < ids.Length; i++)
+                        if (mpb.GetVector(ids[i]) != p.Slots[i]) { mpb.SetVector(ids[i], p.Slots[i]); changed = true; }
+                }
+                if (changed) mr.SetPropertyBlock(mpb);
+            }
+            catch (Exception ex) { if (_lookErr++ < 3) Plugin.Log.LogWarning("[MP] burn look: " + ex.Message); }
+        }
+        private static int _lookErr;
 
         private static readonly Dictionary<ushort, Puppet> _puppets = new Dictionary<ushort, Puppet>();
         private static readonly Dictionary<IntPtr, ushort> _puppetIdByPtr = new Dictionary<IntPtr, ushort>();
@@ -390,6 +489,7 @@ namespace CanEmAllMP
                 byte state = r.GetByte();
                 float health = r.GetFloat();
                 byte holder = r.GetByte(), epoch = r.GetByte();
+                float burn = Mathf.HalfToFloat(r.GetUShort()), dmg = Mathf.HalfToFloat(r.GetUShort());
 
                 bool hidden = (flags & 4) != 0;
                 bool dead = (flags & 1) != 0;
@@ -402,9 +502,11 @@ namespace CanEmAllMP
                     p = SpawnPuppet(truck, id, prefab, pos, rot);
                     if (p == null) continue;
                     _puppets[id] = p;
+                    if (_pendingDeform.TryGetValue(id, out var pend)) { p.Slots = pend; _pendingDeform.Remove(id); }
                     _puppetIdByPtr[p.Enemy.Pointer] = id;
                 }
                 p.LastUpdate = now;
+                p.Burn = burn; p.Dmg = dmg;   // burnt / damaged look, drawn in ApplyLook
                 Hold.ClientState(id, holder, epoch);
                 if (Hold.IsLocal(id)) continue;          // we're the authority for this one
                 if (BeingProcessed(p.Enemy)) continue;

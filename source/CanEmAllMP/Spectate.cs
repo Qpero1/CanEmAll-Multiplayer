@@ -423,10 +423,10 @@ namespace CanEmAllMP
         {
             if (!Dead || SpectateUi.Working) return; // the game-style banner is up (this is the fallback)
             var t = Target();
-            string who = t != null ? Net.NameOf(t.Id) : "nobody";
+            string who = t != null ? Net.NameOf(t.Id) : Loc.T("nobody");
             GUI.Box(new Rect(Screen.width / 2f - 240, 40, 480, 52), "");
-            GUI.Label(new Rect(Screen.width / 2f - 230, 44, 460, 22), $"You died. Spectating {who}. Back when the day ends.");
-            GUI.Label(new Rect(Screen.width / 2f - 230, 66, 460, 22), "Click / Space: next player    Mouse: look    Scroll: zoom");
+            GUI.Label(new Rect(Screen.width / 2f - 230, 44, 460, 22), Loc.F("You died. Spectating {0}. Back when the day ends.", who));
+            GUI.Label(new Rect(Screen.width / 2f - 230, 66, 460, 22), Loc.T("Click / Space: next player    Mouse: look    Scroll: zoom"));
         }
     }
 }
